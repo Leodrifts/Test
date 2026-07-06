@@ -90,13 +90,15 @@ export class Player {
     if (input.back) fwd -= 1;
     if (input.strafeLeft) strafe -= 1;
     if (input.strafeRight) strafe += 1;
+    fwd += input.touchMoveY || 0;
+    strafe += input.touchMoveX || 0;
 
     const running = input.run;
     const speed = MOVE_SPEED * (running ? RUN_MULT : 1) * dt;
 
-    this.moving = fwd !== 0 || strafe !== 0;
+    this.moving = Math.abs(fwd) > 0.05 || Math.abs(strafe) > 0.05;
     if (this.moving) {
-      const len = Math.hypot(fwd, strafe) || 1;
+      const len = Math.max(1, Math.hypot(fwd, strafe));
       const nfwd = (fwd / len) * speed;
       const nstrafe = (strafe / len) * speed;
       const dx = this.dirX * nfwd + (-this.dirY) * nstrafe;

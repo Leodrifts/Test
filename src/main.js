@@ -4,6 +4,7 @@ import { Renderer, IW, IH } from './raycaster.js';
 import { Player } from './player.js';
 import { Enemy, Item, Projectile } from './entities.js';
 import { attachInput, Input } from './input.js';
+import { initTouchControls, requestFullscreenAndLock } from './touch.js';
 import { fireWeapon, WEAPON_DEFS, WEAPON_VIEWS, MUZZLE_FLASH } from './weapons.js';
 import * as audio from './audio.js';
 
@@ -70,7 +71,8 @@ function startGame() {
   overlay.classList.add('hidden');
   audio.resumeAudio();
   audio.startAmbientDrone();
-  screen.requestPointerLock();
+  requestFullscreenAndLock();
+  if (!isTouch) screen.requestPointerLock();
 }
 
 startBtn.onclick = startGame;
@@ -79,6 +81,17 @@ window.addEventListener('keydown', (e) => {
 });
 
 attachInput(screen);
+const isTouch = initTouchControls();
+if (isTouch) {
+  const list = document.querySelector('.controls-list');
+  if (list) {
+    list.innerHTML = `
+      <li><b>Left pad</b> — move &nbsp; <b>Right side drag</b> — turn</li>
+      <li><b>FIRE</b> — shoot &nbsp; <b>1-4</b> — switch weapon</li>
+      <li><b>USE</b> — open door &nbsp; <b>RUN</b> — toggle run</li>
+      <li><b>MAP</b> — zoom map &nbsp; <b>II</b> — pause</li>`;
+  }
+}
 
 function pickupItem(item, player) {
   const messages = {
@@ -188,6 +201,12 @@ function updateHUD() {
 
   const pct = p.health;
   face.textContent = p.dead ? 'X_X' : pct > 66 ? ':)' : pct > 33 ? ':|' : pct > 0 ? '>:(' : 'X_X';
+
+  if (isTouch) {
+    for (const btn of document.querySelectorAll('.wbtn')) {
+      btn.classList.toggle('active', btn.dataset.weapon === p.currentWeapon);
+    }
+  }
 }
 
 function drawMinimap() {
@@ -376,7 +395,8 @@ function loop(now) {
 function resumeGame() {
   state = STATE.PLAYING;
   overlay.classList.add('hidden');
-  screen.requestPointerLock();
+  requestFullscreenAndLock();
+  if (!isTouch) screen.requestPointerLock();
   startBtn.onclick = startGame;
 }
 

@@ -8,7 +8,14 @@ export const Input = {
   weaponSwitch: null,
   mouseDX: 0,
   pointerLocked: false,
+  // analog movement from an on-screen joystick, -1..1 (forward/right positive)
+  touchMoveX: 0,
+  touchMoveY: 0,
 };
+
+export function isTouchDevice() {
+  return ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+}
 
 const KEY_MAP = {
   KeyW: 'forward', ArrowUp: 'forward',
@@ -36,6 +43,8 @@ export function attachInput(canvas) {
   window.addEventListener('keyup', (e) => {
     if (KEY_MAP[e.code]) { Input[KEY_MAP[e.code]] = false; e.preventDefault(); }
   });
+
+  if (isTouchDevice()) return;
 
   canvas.addEventListener('mousedown', (e) => {
     if (e.button === 0) Input.fireHeld = true;
