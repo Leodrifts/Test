@@ -1,0 +1,235 @@
+@font-face {
+  font-family: 'DoomFallback';
+  src: local('Courier New');
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #000;
+  overflow: hidden;
+  height: 100%;
+  font-family: 'DoomFallback', 'Courier New', monospace;
+  color: #d8a557;
+  user-select: none;
+}
+
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+#screen {
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  width: 100vw;
+  height: calc(100vw * 200 / 320);
+  max-height: 100vh;
+  max-width: calc(100vh * 320 / 200);
+  background: #000;
+  display: block;
+  cursor: crosshair;
+}
+
+#crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #ff3b3b;
+  font-size: 20px;
+  font-weight: bold;
+  pointer-events: none;
+  text-shadow: 0 0 3px #000;
+  z-index: 5;
+}
+
+#hud {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 6;
+}
+
+#statusbar {
+  display: flex;
+  align-items: stretch;
+  background: #2b2b2b;
+  border-top: 4px solid #111;
+  box-shadow: 0 -2px 0 #555 inset;
+  width: 100%;
+  max-width: 900px;
+  padding: 6px 14px;
+  gap: 18px;
+  font-size: 13px;
+}
+
+.sb-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 70px;
+}
+
+.sb-label {
+  color: #9a1c1c;
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.sb-value {
+  color: #d8a557;
+  font-size: 22px;
+  font-weight: bold;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.sb-face {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#face {
+  width: 46px;
+  height: 46px;
+  border: 2px solid #111;
+  border-radius: 4px;
+  background: #7a5230;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: #200;
+  font-weight: bold;
+}
+
+.sb-keys {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.sb-keys .key-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid #000;
+}
+
+#minimap-wrap {
+  position: absolute;
+  right: 12px;
+  bottom: 76px;
+  z-index: 7;
+  pointer-events: none;
+  opacity: 0.92;
+}
+
+#minimap {
+  background: rgba(0,0,0,0.55);
+  border: 2px solid #555;
+  border-radius: 3px;
+}
+
+#messages {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+}
+
+#messages .msg {
+  color: #ffce4d;
+  font-size: 14px;
+  text-shadow: 1px 1px 2px #000, 0 0 6px #000;
+  animation: fadeout 3s forwards;
+}
+
+@keyframes fadeout {
+  0% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.screen-overlay {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, #2a0000 0%, #000 80%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  text-align: center;
+}
+
+.screen-overlay.hidden { display: none; }
+
+.overlay-inner {
+  max-width: 560px;
+  padding: 20px;
+}
+
+.doom-logo {
+  font-size: 64px;
+  letter-spacing: 8px;
+  margin: 0;
+  color: #a11;
+  text-shadow: 0 0 20px #ff2222, 3px 3px 0 #400;
+}
+.doom-logo .o1 { color: #ff8800; }
+.doom-logo .o2 { color: #ffcc00; }
+
+.tagline {
+  color: #888;
+  margin-top: 4px;
+  font-size: 13px;
+  letter-spacing: 2px;
+}
+
+.controls-list {
+  list-style: none;
+  padding: 0;
+  margin: 18px 0;
+  color: #c8a870;
+  font-size: 13px;
+  line-height: 1.9;
+  text-align: left;
+  display: inline-block;
+}
+
+#overlay-body p { color: #ddd; font-size: 14px; }
+
+#start-btn {
+  background: #7a1c1c;
+  color: #ffce4d;
+  border: 2px solid #ffce4d;
+  padding: 12px 28px;
+  font-size: 16px;
+  letter-spacing: 2px;
+  cursor: pointer;
+  font-family: inherit;
+  margin-top: 12px;
+}
+#start-btn:hover { background: #a11; }
+
+#overlay h2 { color: #ff3b3b; font-size: 40px; margin-bottom: 4px; }
+#overlay .stats { color: #ccc; font-size: 14px; line-height: 1.8; }

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOOM // Recreation</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23000'/%3E%3Ctext x='8' y='13' font-size='12' text-anchor='middle' fill='%23ff3b3b'%3E%E2%98%A0%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <canvas id="screen" width="320" height="200"></canvas>
+
+    <div id="hud">
+      <div id="minimap-wrap"><canvas id="minimap" width="120" height="120"></canvas></div>
+
+      <div id="statusbar">
+        <div class="sb-group">
+          <div class="sb-label">HEALTH</div>
+          <div class="sb-value" id="hp-val">100%</div>
+        </div>
+        <div class="sb-group">
+          <div class="sb-label">ARMOR</div>
+          <div class="sb-value" id="ar-val">0%</div>
+        </div>
+        <div class="sb-face">
+          <div id="face">:)</div>
+        </div>
+        <div class="sb-group">
+          <div class="sb-label">AMMO</div>
+          <div class="sb-value" id="ammo-val">50</div>
+        </div>
+        <div class="sb-group">
+          <div class="sb-label">WEAPON</div>
+          <div class="sb-value" id="weapon-val">PISTOL</div>
+        </div>
+        <div class="sb-keys" id="keys-val"></div>
+      </div>
+    </div>
+
+    <div id="crosshair">+</div>
+
+    <div id="messages"></div>
+
+    <div id="overlay" class="screen-overlay">
+      <div class="overlay-inner">
+        <h1 class="doom-logo">D<span class="o1">O</span><span class="o2">O</span>M</h1>
+        <p class="tagline">— a from-scratch recreation —</p>
+        <div id="overlay-body">
+          <p>Click / press <b>ENTER</b> to begin your descent into the facility.</p>
+          <ul class="controls-list">
+            <li><b>WASD</b> — move &nbsp; <b>Mouse / ←→</b> — turn</li>
+            <li><b>Left Click / Ctrl</b> — fire &nbsp; <b>1-4</b> — switch weapon</li>
+            <li><b>E</b> — use / open door &nbsp; <b>Shift</b> — run</li>
+            <li><b>Tab</b> — map &nbsp; <b>Esc</b> — pause</li>
+          </ul>
+        </div>
+        <button id="start-btn">PRESS TO START</button>
+      </div>
+    </div>
+  </div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
