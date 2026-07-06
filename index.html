@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>DOOM // Recreation</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23000'/%3E%3Ctext x='8' y='13' font-size='12' text-anchor='middle' fill='%23ff3b3b'%3E%E2%98%A0%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <canvas id="screen" width="320" height="200"></canvas>
+
+    <div id="minimap-wrap"><canvas id="minimap" width="120" height="120"></canvas></div>
+
+    <div id="hud">
+      <div id="statusbar">
+        <div class="sb-group">
+          <div class="sb-label">HEALTH</div>
+          <div class="sb-value" id="hp-val">100%</div>
+        </div>
+        <div class="sb-group">
+          <div class="sb-label">ARMOR</div>
+          <div class="sb-value" id="ar-val">0%</div>
+        </div>
+        <div class="sb-face">
+          <div id="face">:)</div>
+        </div>
+        <div class="sb-group">
+          <div class="sb-label">AMMO</div>
+          <div class="sb-value" id="ammo-val">50</div>
+        </div>
+        <div class="sb-group">
+          <div class="sb-label">WEAPON</div>
+          <div class="sb-value" id="weapon-val">PISTOL</div>
+        </div>
+        <div class="sb-keys" id="keys-val"></div>
+      </div>
+    </div>
+
+    <div id="crosshair">+</div>
+
+    <div id="messages"></div>
+
+    <div id="touch-controls">
+      <div id="look-zone"></div>
+      <div id="joystick-zone">
+        <div id="joystick-base">
+          <div id="joystick-knob"></div>
+        </div>
+      </div>
+
+      <div id="touch-top-bar">
+        <button id="btn-pause" class="tbtn" aria-label="Pause">II</button>
+        <button id="btn-map" class="tbtn" aria-label="Map">MAP</button>
+        <button id="btn-fullscreen" class="tbtn" aria-label="Fullscreen">⛶</button>
+      </div>
+
+      <div id="touch-weapons">
+        <button class="wbtn" data-weapon="fists">1</button>
+        <button class="wbtn" data-weapon="pistol">2</button>
+        <button class="wbtn" data-weapon="shotgun">3</button>
+        <button class="wbtn" data-weapon="chaingun">4</button>
+      </div>
+
+      <button id="btn-run" class="action-btn">RUN</button>
+      <button id="btn-use" class="action-btn">USE</button>
+      <button id="btn-fire" class="fire-btn">FIRE</button>
+    </div>
+
+    <div id="overlay" class="screen-overlay">
+      <div class="overlay-inner">
+        <h1 class="doom-logo">D<span class="o1">O</span><span class="o2">O</span>M</h1>
+        <p class="tagline">— a from-scratch recreation —</p>
+        <div id="overlay-body">
+          <p>Click / press <b>ENTER</b> to begin your descent into the facility.</p>
+          <ul class="controls-list">
+            <li><b>WASD</b> — move &nbsp; <b>Mouse / ←→</b> — turn</li>
+            <li><b>Left Click / Ctrl</b> — fire &nbsp; <b>1-4</b> — switch weapon</li>
+            <li><b>E</b> — use / open door &nbsp; <b>Shift</b> — run</li>
+            <li><b>Tab</b> — map &nbsp; <b>Esc</b> — pause</li>
+          </ul>
+        </div>
+        <button id="start-btn">PRESS TO START</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="rotate-hint">
+    <div class="rotate-inner">
+      <div class="rotate-icon">⟳</div>
+      Rotate your device<br>for the full experience
+    </div>
+  </div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
