@@ -1,0 +1,1380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Appointment Board — Reserve a Session</title>
+<style>
+  /* ---------------------------------------------------------
+     Tokens
+  --------------------------------------------------------- */
+  :root{
+    --bg: #EDEEE9;
+    --board-bg: #1B1D22;
+    --board-row: #23262C;
+    --board-row-alt: #272A31;
+    --ink: #ECE8DC;
+    --ink-dim: #8C8F95;
+    --amber: #E29B36;
+    --amber-strong: #F0AE4C;
+    --red: #D2584A;
+    --green: #6FB98F;
+    --paper: #F7F5EF;
+    --paper-line: #D8D3C4;
+    --text: #1B1D22;
+    --text-dim: #5B5E63;
+    --hairline: #C9C4B4;
+    --shadow: 0 18px 40px -20px rgba(20,18,12,0.35);
+    --radius: 10px;
+    --font-display: "Charter", "Iowan Old Style", "Georgia", "Times New Roman", serif;
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas", "Roboto Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg: #0A0B0D;
+      --board-bg: #121419;
+      --board-row: #181B21;
+      --board-row-alt: #1D2027;
+      --paper: #17181B;
+      --paper-line: #2D2F35;
+      --text: #E7E5DC;
+      --text-dim: #9A9C9F;
+      --hairline: #2A2C31;
+      --shadow: 0 18px 40px -20px rgba(0,0,0,0.6);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg: #0A0B0D;
+    --board-bg: #121419;
+    --board-row: #181B21;
+    --board-row-alt: #1D2027;
+    --paper: #17181B;
+    --paper-line: #2D2F35;
+    --text: #E7E5DC;
+    --text-dim: #9A9C9F;
+    --hairline: #2A2C31;
+    --shadow: 0 18px 40px -20px rgba(0,0,0,0.6);
+  }
+  :root[data-theme="light"]{
+    --bg: #EDEEE9;
+    --board-bg: #1B1D22;
+    --board-row: #23262C;
+    --board-row-alt: #272A31;
+    --paper: #F7F5EF;
+    --paper-line: #D8D3C4;
+    --text: #1B1D22;
+    --text-dim: #5B5E63;
+    --hairline: #C9C4B4;
+    --shadow: 0 18px 40px -20px rgba(20,18,12,0.35);
+  }
+
+  /* ---------------------------------------------------------
+     Reset-ish
+  --------------------------------------------------------- */
+  *,*::before,*::after{ box-sizing: border-box; }
+  html,body{ margin:0; padding:0; }
+  [hidden]{ display: none !important; }
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1,h2,h3{ font-family: var(--font-display); font-weight: 600; text-wrap: balance; margin:0; }
+  button{ font-family: inherit; }
+  ::selection{ background: var(--amber); color: #1B1D22; }
+  :focus-visible{ outline: 2px solid var(--amber-strong); outline-offset: 2px; border-radius: 4px; }
+
+  @media (prefers-reduced-motion: reduce){
+    *{ animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  }
+
+  /* ---------------------------------------------------------
+     Page shell
+  --------------------------------------------------------- */
+  .page{
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: clamp(24px, 5vw, 56px) clamp(18px, 4vw, 32px) 80px;
+  }
+
+  .head{
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-bottom: clamp(28px, 4vw, 44px);
+  }
+  .eyebrow{
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before{
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--amber-strong);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber-strong) 25%, transparent);
+    flex: none;
+  }
+  .head h1{
+    font-size: clamp(28px, 4vw, 40px);
+    letter-spacing: -0.01em;
+  }
+  .head p{
+    max-width: 62ch;
+    color: var(--text-dim);
+    font-size: 15.5px;
+    margin: 0;
+  }
+  .head p strong{ color: var(--text); font-weight: 600; }
+
+  /* Day tabs */
+  .day-tabs{
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-top: 6px;
+    scrollbar-width: thin;
+  }
+  .day-tab{
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 64px;
+    padding: 10px 12px 9px;
+    border-radius: 8px;
+    border: 1px solid var(--hairline);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  }
+  .day-tab:hover{ border-color: var(--amber-strong); }
+  .day-tab:active{ transform: translateY(1px); }
+  .day-tab .dow{
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .day-tab .dom{ font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .day-tab[aria-pressed="true"]{
+    background: var(--board-bg);
+    border-color: var(--board-bg);
+  }
+  .day-tab[aria-pressed="true"] .dow{ color: var(--amber-strong); }
+  .day-tab[aria-pressed="true"] .dom{ color: var(--ink); }
+
+  /* ---------------------------------------------------------
+     Layout: board + ticket
+  --------------------------------------------------------- */
+  .layout{
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr);
+    gap: 28px;
+    align-items: start;
+  }
+  @media (max-width: 860px){
+    .layout{ grid-template-columns: 1fr; }
+  }
+
+  /* ---------------------------------------------------------
+     Board
+  --------------------------------------------------------- */
+  .board-wrap{
+    background: var(--board-bg);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    position: relative;
+  }
+  .board-head{
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 18px 20px 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+  }
+  .board-head h2{
+    font-family: var(--font-mono);
+    color: var(--ink);
+    font-size: 13px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .board-head .board-date{
+    font-family: var(--font-mono);
+    color: var(--ink-dim);
+    font-size: 12.5px;
+  }
+  .board-cols{
+    display: grid;
+    grid-template-columns: 108px 1fr 92px;
+    padding: 10px 20px 6px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .board-rows{
+    padding: 0 10px 10px;
+    max-height: 560px;
+    overflow-y: auto;
+  }
+  .row{
+    display: grid;
+    grid-template-columns: 108px 1fr 92px;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 10px;
+    border-radius: 6px;
+    background: var(--board-row);
+    margin-bottom: 3px;
+  }
+  .row.enter{ animation: flapIn 0.3s ease both; }
+  .row:nth-child(even){ background: var(--board-row-alt); }
+  .row .time{
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    font-size: 13.5px;
+  }
+  .row .time small{ color: var(--ink-dim); font-size: 11px; }
+  .row .status{
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    letter-spacing: 0.04em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .row .status .name{
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row .chip{
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: right;
+    color: var(--ink-dim);
+  }
+
+  .row.available{ cursor: pointer; }
+  .row.available .status{ color: var(--amber-strong); }
+  .row.available .status::before{ content: "●"; font-size: 8px; color: var(--amber-strong); }
+  .row.available:hover{ background: color-mix(in srgb, var(--amber) 16%, var(--board-row)); }
+  .row.available:focus-visible{ outline-offset: -2px; }
+
+  .row.selected{
+    background: color-mix(in srgb, var(--amber) 30%, var(--board-row)) !important;
+    box-shadow: inset 0 0 0 1px var(--amber-strong);
+  }
+  .row.selected .status{ color: var(--ink); font-weight: 600; }
+  .row.preview-hold{
+    background: color-mix(in srgb, var(--amber) 14%, var(--board-row)) !important;
+  }
+
+  .row.reserved-start .status,
+  .row.reserved-hold .status{ color: color-mix(in srgb, var(--red) 88%, white 4%); }
+  .row.reserved-start .status::before{ content: "●"; font-size: 8px; color: var(--red); }
+  .row.reserved-hold .status::before{ content: "·"; font-size: 14px; color: var(--red); line-height: 0; }
+  .row.reserved-hold .name{ color: var(--ink-dim); font-style: italic; }
+  .row.reserved-hold{ background: repeating-linear-gradient(135deg, var(--board-row) 0 8px, color-mix(in srgb, var(--red) 8%, var(--board-row)) 8px 16px); }
+  .row:nth-child(even).reserved-hold{ background: repeating-linear-gradient(135deg, var(--board-row-alt) 0 8px, color-mix(in srgb, var(--red) 8%, var(--board-row-alt)) 8px 16px); }
+
+  .row.unavailable .status{ color: var(--ink-dim); }
+  .row.unavailable .status::before{ content: "×"; color: var(--ink-dim); }
+  .row.past{ opacity: 0.38; }
+  .row.past .status::before{ content: ""; }
+
+  .row.just-booked{ animation: confirmFlash 0.9s ease; }
+
+  @keyframes flapIn{
+    from{ transform: rotateX(70deg); opacity: 0; }
+    to{ transform: rotateX(0deg); opacity: 1; }
+  }
+  @keyframes confirmFlash{
+    0%{ box-shadow: inset 0 0 0 2px var(--green); }
+    100%{ box-shadow: inset 0 0 0 0px transparent; }
+  }
+
+  .board-legend{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding: 12px 20px 18px;
+    border-top: 1px solid rgba(255,255,255,0.07);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .board-legend span{ display: inline-flex; align-items: center; gap: 6px; }
+  .board-legend i{ width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .board-legend .lg-amber{ background: var(--amber-strong); }
+  .board-legend .lg-red{ background: var(--red); }
+  .board-legend .lg-grey{ background: var(--ink-dim); }
+
+  /* ---------------------------------------------------------
+     Ticket panel
+  --------------------------------------------------------- */
+  .ticket{
+    position: sticky;
+    top: 20px;
+    background: var(--paper);
+    border: 1px solid var(--paper-line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .ticket-top{
+    padding: 20px 22px 16px;
+    border-bottom: 1px dashed var(--paper-line);
+    position: relative;
+  }
+  .ticket-top::before,
+  .ticket-top::after{
+    content: "";
+    position: absolute;
+    bottom: -9px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--bg);
+  }
+  .ticket-top::before{ left: -9px; }
+  .ticket-top::after{ right: -9px; }
+
+  .ticket-kicker{
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .ticket-slot{
+    font-family: var(--font-display);
+    font-size: 24px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .ticket-slot .dash{ color: var(--text-dim); font-weight: 400; margin: 0 6px; }
+  .ticket-sub{ font-size: 13px; color: var(--text-dim); margin-top: 4px; }
+  .ticket-empty{
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+
+  .ticket-form{
+    padding: 18px 22px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .field{ display: flex; flex-direction: column; gap: 6px; }
+  .field label{
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text-dim);
+  }
+  .field input, .field textarea{
+    font-family: var(--font-ui);
+    font-size: 14.5px;
+    padding: 10px 12px;
+    border-radius: 7px;
+    border: 1px solid var(--hairline);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .field textarea{ resize: vertical; min-height: 56px; }
+  .field input:focus, .field textarea:focus{ border-color: var(--amber-strong); }
+
+  .btn{
+    appearance: none;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 14.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.08s ease, filter 0.15s ease, opacity 0.15s ease;
+  }
+  .btn:active{ transform: translateY(1px); }
+  .btn-primary{
+    background: var(--amber-strong);
+    color: #201404;
+  }
+  .btn-primary:hover{ filter: brightness(1.06); }
+  .btn-primary:disabled{ opacity: 0.45; cursor: not-allowed; filter: none; }
+  .btn-ghost{
+    background: transparent;
+    border: 1px solid var(--hairline);
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .btn-ghost:hover{ border-color: var(--red); color: var(--red); }
+
+  .form-note{ font-size: 12px; color: var(--text-dim); }
+  .form-error{
+    font-size: 12.5px;
+    color: var(--red);
+    display: none;
+  }
+  .form-error.show{ display: block; }
+  .form-success{
+    font-size: 12.5px;
+    color: var(--green);
+    display: none;
+    font-weight: 600;
+  }
+  .form-success.show{ display: block; }
+
+  /* My reservations list */
+  .mine{
+    padding: 4px 22px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .mine h3{
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding-top: 16px;
+    border-top: 1px dashed var(--paper-line);
+  }
+  .mine-item{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 7px;
+    background: var(--bg);
+    border: 1px solid var(--paper-line);
+  }
+  .mine-item .mi-info{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .mine-item .mi-time{ font-family: var(--font-mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .mine-item .mi-name{ font-size: 12.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mine-empty{ font-size: 13px; color: var(--text-dim); padding: 10px 0 0; }
+
+  footer.foot{
+    margin-top: 40px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    text-align: center;
+  }
+
+  /* ---------------------------------------------------------
+     View switch
+  --------------------------------------------------------- */
+  .view-switch{
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .view-btn{
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 8px 15px;
+    border-radius: 7px;
+    border: 1px solid var(--hairline);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .view-btn:hover{ border-color: var(--amber-strong); color: var(--text); }
+  .view-btn[aria-pressed="true"]{
+    background: var(--board-bg);
+    border-color: var(--board-bg);
+    color: var(--ink);
+  }
+
+  /* Row divider (midday break) */
+  .row-break{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 9px 10px;
+    margin-bottom: 3px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .row-break::before,
+  .row-break::after{
+    content: "";
+    flex: 1;
+    height: 0;
+    border-top: 1px dashed rgba(255,255,255,0.14);
+  }
+
+  /* ---------------------------------------------------------
+     Week & month calendar views
+  --------------------------------------------------------- */
+  .cal-view{ padding: 18px 20px 22px; }
+  .cal-nav{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .cal-nav .cal-title{
+    font-family: var(--font-mono);
+    color: var(--ink);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    flex: 1;
+    text-align: center;
+  }
+  .nav-arrow{
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.14);
+    color: var(--ink);
+    width: 30px; height: 30px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+  }
+  .nav-arrow:hover{ border-color: var(--amber-strong); color: var(--amber-strong); }
+  .today-btn{
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 7px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: transparent;
+    color: var(--ink-dim);
+    cursor: pointer;
+  }
+  .today-btn:hover{ border-color: var(--amber-strong); color: var(--ink); }
+
+  /* Week grid */
+  .week-grid{
+    display: grid;
+    grid-template-columns: 46px repeat(7, 1fr);
+    column-gap: 4px;
+  }
+  .wk-corner{}
+  .wk-daycol-head{
+    text-align: center;
+    padding: 4px 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    color: inherit;
+  }
+  .wk-daycol-head:hover{ background: rgba(255,255,255,0.06); }
+  .wk-daycol-head .dow{
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .wk-daycol-head .dom{
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .wk-daycol-head.is-today .dom{ color: var(--amber-strong); }
+  .wk-hourrail{ position: relative; height: 520px; }
+  .wk-hourrail .hr-label{
+    position: absolute;
+    right: 8px;
+    transform: translateY(-50%);
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--ink-dim);
+  }
+  .wk-col{
+    position: relative;
+    height: 520px;
+    border-left: 1px solid rgba(255,255,255,0.07);
+    background-image: repeating-linear-gradient(to bottom, rgba(255,255,255,0.08) 0, rgba(255,255,255,0.08) 1px, transparent 1px, transparent 12.5%);
+    cursor: pointer;
+    border-radius: 0 4px 4px 0;
+  }
+  .wk-col:hover{ background-color: rgba(255,255,255,0.03); }
+  .wk-col.is-today{ background-color: color-mix(in srgb, var(--amber) 6%, transparent); }
+  .wk-break{
+    position: absolute;
+    left: 0; right: 0;
+    background: repeating-linear-gradient(135deg, transparent 0 6px, rgba(255,255,255,0.045) 6px 12px);
+    border-top: 1px dashed rgba(255,255,255,0.16);
+    border-bottom: 1px dashed rgba(255,255,255,0.16);
+    pointer-events: none;
+  }
+  .wk-block{
+    position: absolute;
+    left: 3px; right: 3px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--red) 55%, var(--board-row));
+    border: 1px solid color-mix(in srgb, var(--red) 65%, black 12%);
+    padding: 2px 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink);
+    overflow: hidden;
+    line-height: 1.3;
+    z-index: 2;
+  }
+  .wk-now{
+    position: absolute;
+    left: 0; right: 0;
+    height: 0;
+    border-top: 2px solid var(--amber-strong);
+    z-index: 3;
+  }
+  .wk-now::before{
+    content: "";
+    position: absolute;
+    left: -3px; top: -4px;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--amber-strong);
+  }
+
+  /* Month grid */
+  .month-dow-row{
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    margin-bottom: 6px;
+  }
+  .mo-dow{
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    text-align: center;
+  }
+  .month-grid{
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 6px;
+  }
+  .mo-cell{
+    appearance: none;
+    border: 1px solid rgba(255,255,255,0.07);
+    background: var(--board-row);
+    border-radius: 8px;
+    min-height: 74px;
+    padding: 8px;
+    text-align: left;
+    color: var(--ink);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: border-color 0.15s ease;
+  }
+  .mo-cell:hover{ border-color: var(--amber-strong); }
+  .mo-cell.out{ opacity: 0.4; }
+  .mo-cell.is-today{ box-shadow: inset 0 0 0 1px var(--amber-strong); }
+  .mo-date{ font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .mo-count{
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: color-mix(in srgb, var(--red) 85%, white 6%);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .mo-count i{ width: 6px; height: 6px; border-radius: 50%; background: var(--red); display: inline-block; }
+
+  @media (max-width: 640px){
+    .week-grid{ grid-template-columns: 32px repeat(7, 1fr); }
+    .wk-daycol-head .dom{ font-size: 13px; }
+    .wk-hourrail .hr-label{ font-size: 8.5px; right: 4px; }
+    .mo-cell{ min-height: 56px; padding: 6px; }
+    .mo-date{ font-size: 11.5px; }
+    .mo-count{ font-size: 9px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="head">
+    <div class="eyebrow">Appointment Board</div>
+    <h1>Reserve a session</h1>
+    <p>
+      Every session runs <strong>30 minutes</strong>. New starting times open every
+      <strong>15 minutes</strong> — book one and the board automatically holds the
+      following quarter-hour, so no session ever overlaps the next. Open
+      <strong>9:00&ndash;12:00</strong> and <strong>1:00&ndash;5:00</strong>, with a midday break between.
+    </p>
+    <div class="view-switch" id="viewSwitch" role="tablist" aria-label="Calendar view">
+      <button type="button" class="view-btn" data-view="day" aria-pressed="true">Day</button>
+      <button type="button" class="view-btn" data-view="week" aria-pressed="false">Week</button>
+      <button type="button" class="view-btn" data-view="month" aria-pressed="false">Month</button>
+    </div>
+    <nav class="day-tabs" id="dayTabs" aria-label="Choose a day"></nav>
+  </header>
+
+  <div class="layout" id="dayLayout">
+    <section class="board-wrap" aria-label="Time slot board">
+      <div class="board-head">
+        <h2>Today's Board</h2>
+        <span class="board-date" id="boardDate"></span>
+      </div>
+      <div class="board-cols">
+        <span>Time</span>
+        <span>Status</span>
+        <span style="text-align:right;">Length</span>
+      </div>
+      <div class="board-rows" id="boardRows"></div>
+      <div class="board-legend">
+        <span><i class="lg-amber"></i>Available</span>
+        <span><i class="lg-red"></i>Reserved</span>
+        <span><i class="lg-grey"></i>Unavailable</span>
+      </div>
+    </section>
+
+    <aside class="ticket">
+      <div class="ticket-top">
+        <div class="ticket-kicker">Your selection</div>
+        <div id="ticketSlotWrap">
+          <p class="ticket-empty">Pick an available time on the board to begin.</p>
+        </div>
+      </div>
+      <form class="ticket-form" id="bookingForm">
+        <div class="field">
+          <label for="fName">Name</label>
+          <input type="text" id="fName" name="name" placeholder="Jordan Blake" autocomplete="name" />
+        </div>
+        <div class="field">
+          <label for="fNote">Note <span style="font-weight:400; color:var(--text-dim);">(optional)</span></label>
+          <textarea id="fNote" name="note" placeholder="What's this session about?"></textarea>
+        </div>
+        <p class="form-error" id="formError">Choose a time and enter your name first.</p>
+        <p class="form-success" id="formSuccess">Reserved — your 30 minutes are held.</p>
+        <button type="submit" class="btn btn-primary" id="submitBtn" disabled>Reserve this slot</button>
+        <p class="form-note">Booking a slot holds it and the next 15 minutes automatically. You can release it below any time.</p>
+      </form>
+      <div class="mine">
+        <h3>Your reservations — <span id="mineDate"></span></h3>
+        <div id="mineList"></div>
+      </div>
+    </aside>
+  </div>
+
+  <section class="board-wrap cal-view" id="weekView" aria-label="Week view" hidden>
+    <div class="cal-nav">
+      <button type="button" class="nav-arrow" id="wkPrev" aria-label="Previous week">‹</button>
+      <div class="cal-title" id="wkTitle"></div>
+      <button type="button" class="today-btn" id="wkToday">Today</button>
+      <button type="button" class="nav-arrow" id="wkNext" aria-label="Next week">›</button>
+    </div>
+    <div class="week-grid" id="weekGrid"></div>
+  </section>
+
+  <section class="board-wrap cal-view" id="monthView" aria-label="Month view" hidden>
+    <div class="cal-nav">
+      <button type="button" class="nav-arrow" id="moPrev" aria-label="Previous month">‹</button>
+      <div class="cal-title" id="moTitle"></div>
+      <button type="button" class="today-btn" id="moToday">Today</button>
+      <button type="button" class="nav-arrow" id="moNext" aria-label="Next month">›</button>
+    </div>
+    <div class="month-dow-row" id="monthDowRow"></div>
+    <div class="month-grid" id="monthGrid"></div>
+  </section>
+
+  <footer class="foot">Demo board — reservations are stored in this browser only.</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var BLOCKS = [
+    { start: 9 * 60, end: 12 * 60 },   // 09:00 – 12:00
+    { start: 13 * 60, end: 17 * 60 }   // 13:00 – 17:00
+  ];
+  var OPEN_MIN = BLOCKS[0].start;
+  var CLOSE_MIN = BLOCKS[BLOCKS.length - 1].end;
+  var DAY_RANGE = CLOSE_MIN - OPEN_MIN;
+  var STEP = 15;              // grid granularity
+  var SESSION_LEN = 30;       // appointment length
+  var DAYS_SHOWN = 7;
+  var STORAGE_KEY = "appt-board-bookings-v1";
+  var SEED_KEY = "appt-board-seeded-v1";
+
+  function daySlots(){
+    var list = [];
+    BLOCKS.forEach(function(b){
+      for (var t = b.start; t < b.end; t += STEP){
+        list.push({ start: t, blockEnd: b.end });
+      }
+    });
+    return list;
+  }
+
+  var DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  var MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+  function pad2(n){ return n < 10 ? "0" + n : "" + n; }
+
+  function dateKey(d){
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+  }
+  function keyToDate(key){
+    var parts = key.split("-");
+    return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  }
+  function startOfWeek(d){
+    var day = d.getDay(); // 0=Sun..6=Sat
+    var diff = day === 0 ? -6 : 1 - day; // shift to Monday
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff);
+  }
+  function addDays(d, n){ return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
+  function addMonths(d, n){ return new Date(d.getFullYear(), d.getMonth() + n, 1); }
+
+  function minutesToLabel(min){
+    var h = Math.floor(min / 60), m = min % 60;
+    var ampm = h >= 12 ? "PM" : "AM";
+    var h12 = h % 12; if (h12 === 0) h12 = 12;
+    return h12 + (m === 0 ? "" : ":" + pad2(m)) + " " + ampm;
+  }
+  function minutesToShort(min){
+    var h = Math.floor(min / 60), m = min % 60;
+    var h12 = h % 12; if (h12 === 0) h12 = 12;
+    return h12 + ":" + pad2(m);
+  }
+
+  function loadAll(){
+    try{
+      var raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    }catch(e){ return {}; }
+  }
+  function saveAll(data){
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }catch(e){}
+  }
+
+  var allBookings = loadAll();
+  var today = new Date();
+  var days = [];
+  for (var i = 0; i < DAYS_SHOWN; i++){
+    var d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
+    days.push(d);
+  }
+  var selectedDayKey = dateKey(days[0]);
+  var selectedStart = null; // minutes
+
+  // ---- seed a couple of sample reservations on first run, today only ----
+  (function seed(){
+    if (localStorage.getItem(SEED_KEY)) return;
+    localStorage.setItem(SEED_KEY, "1");
+    var key = dateKey(days[0]);
+    var nowMin = today.getHours() * 60 + today.getMinutes();
+    var validStarts = daySlots()
+      .filter(function(s){ return (s.start + SESSION_LEN) <= s.blockEnd && s.start >= nowMin + 15; })
+      .map(function(s){ return s.start; });
+    var seeded = [];
+    if (validStarts.length){
+      seeded.push({ id: "seed-1", start: validStarts[0], name: "Priya N.", note: "Consult" });
+      var second = validStarts.find(function(s){ return s >= validStarts[0] + 90; });
+      if (second !== undefined){
+        seeded.push({ id: "seed-2", start: second, name: "Marcus T.", note: "Follow-up" });
+      }
+    }
+    if (seeded.length){
+      allBookings[key] = seeded;
+      saveAll(allBookings);
+    }
+  })();
+
+  // ---------------------------------------------------------
+  // Day tabs
+  // ---------------------------------------------------------
+  var dayTabsEl = document.getElementById("dayTabs");
+  function renderDayTabs(){
+    dayTabsEl.innerHTML = "";
+    days.forEach(function(d){
+      var key = dateKey(d);
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "day-tab";
+      btn.setAttribute("aria-pressed", key === selectedDayKey ? "true" : "false");
+      btn.innerHTML = '<span class="dow">' + DOW[d.getDay()] + '</span><span class="dom">' + d.getDate() + '</span>';
+      btn.addEventListener("click", function(){
+        selectedDayKey = key;
+        selectedStart = null;
+        renderDayTabs();
+        renderBoard(true);
+        renderTicket();
+        renderMine();
+      });
+      dayTabsEl.appendChild(btn);
+    });
+  }
+
+  // ---------------------------------------------------------
+  // Board
+  // ---------------------------------------------------------
+  var boardRowsEl = document.getElementById("boardRows");
+  var boardDateEl = document.getElementById("boardDate");
+
+  function bookingsForDay(key){
+    return allBookings[key] || [];
+  }
+
+  function occupancyMap(key){
+    var map = {}; // minute -> {type:'start'|'hold', booking}
+    bookingsForDay(key).forEach(function(b){
+      map[b.start] = { type: "start", booking: b };
+      map[b.start + STEP] = { type: "hold", booking: b };
+    });
+    return map;
+  }
+
+  function isToday(key){ return key === dateKey(today); }
+
+  function buildRow(start, blockEnd, occ, nowMin, todays, animate){
+    var row = document.createElement("div");
+    row.className = animate ? "row enter" : "row";
+    row.dataset.start = start;
+
+    var timeEl = document.createElement("div");
+    timeEl.className = "time";
+    timeEl.innerHTML = minutesToShort(start) + " <small>" + (start % 60 === 0 ? (start < 720 ? "AM" : "PM") : "") + "</small>";
+
+    var statusEl = document.createElement("div");
+    statusEl.className = "status";
+
+    var chipEl = document.createElement("div");
+    chipEl.className = "chip";
+
+    var pastCutoff = todays && start < nowMin;
+    var occEntry = occ[start];
+    var fitsBeforeClose = (start + SESSION_LEN) <= blockEnd;
+    var nextOccupied = !!occ[start + STEP];
+
+    if (pastCutoff){
+      row.classList.add("past");
+      statusEl.innerHTML = '<span class="name">Past</span>';
+      chipEl.textContent = "—";
+    } else if (occEntry && occEntry.type === "start"){
+      row.classList.add("reserved-start");
+      statusEl.innerHTML = '<span class="name">' + escapeHtml(occEntry.booking.name || "Reserved") + '</span>';
+      chipEl.textContent = "30 min";
+    } else if (occEntry && occEntry.type === "hold"){
+      row.classList.add("reserved-hold");
+      statusEl.innerHTML = '<span class="name">held for ' + escapeHtml(occEntry.booking.name || "prior session") + '</span>';
+      chipEl.textContent = "held";
+    } else if (!fitsBeforeClose || nextOccupied){
+      row.classList.add("unavailable");
+      statusEl.innerHTML = '<span class="name">Unavailable</span>';
+      chipEl.textContent = "—";
+    } else {
+      row.classList.add("available");
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.setAttribute("aria-pressed", String(selectedStart === start));
+      statusEl.innerHTML = '<span class="name">Available</span>';
+      chipEl.textContent = "30 min";
+      var selectFn = function(s){ return function(){ selectSlot(s); }; }(start);
+      row.addEventListener("click", selectFn);
+      row.addEventListener("keydown", function(fn){
+        return function(ev){ if (ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); fn(); } };
+      }(selectFn));
+    }
+
+    if (start === selectedStart){
+      row.classList.add("selected");
+    } else if (selectedStart !== null && start === selectedStart + STEP){
+      row.classList.add("preview-hold");
+    }
+
+    row.appendChild(timeEl);
+    row.appendChild(statusEl);
+    row.appendChild(chipEl);
+    return row;
+  }
+
+  function renderBoard(animate){
+    var d = keyToDate(selectedDayKey);
+    boardDateEl.textContent = DOW[d.getDay()] + ", " + MONTHS[d.getMonth()] + " " + d.getDate();
+
+    var occ = occupancyMap(selectedDayKey);
+    var nowMin = today.getHours() * 60 + today.getMinutes();
+    var todays = isToday(selectedDayKey);
+
+    boardRowsEl.innerHTML = "";
+    BLOCKS.forEach(function(block, bIdx){
+      if (bIdx > 0){
+        var divider = document.createElement("div");
+        divider.className = "row-break";
+        divider.textContent = minutesToShort(BLOCKS[bIdx - 1].end) + "–" + minutesToShort(block.start) + " · Midday break";
+        boardRowsEl.appendChild(divider);
+      }
+      for (var start = block.start; start < block.end; start += STEP){
+        boardRowsEl.appendChild(buildRow(start, block.end, occ, nowMin, todays, animate));
+      }
+    });
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, function(c){
+      return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c];
+    });
+  }
+
+  function selectSlot(start){
+    selectedStart = start;
+    renderBoard();
+    renderTicket();
+    document.getElementById("fName").focus();
+  }
+
+  // ---------------------------------------------------------
+  // Ticket / booking form
+  // ---------------------------------------------------------
+  var ticketSlotWrap = document.getElementById("ticketSlotWrap");
+  var bookingForm = document.getElementById("bookingForm");
+  var submitBtn = document.getElementById("submitBtn");
+  var formError = document.getElementById("formError");
+  var formSuccess = document.getElementById("formSuccess");
+
+  function renderTicket(){
+    formSuccess.classList.remove("show");
+    formError.classList.remove("show");
+    if (selectedStart === null){
+      ticketSlotWrap.innerHTML = '<p class="ticket-empty">Pick an available time on the board to begin.</p>';
+      submitBtn.disabled = true;
+      return;
+    }
+    var d = keyToDate(selectedDayKey);
+    var endMin = selectedStart + SESSION_LEN;
+    ticketSlotWrap.innerHTML =
+      '<div class="ticket-slot">' + minutesToLabel(selectedStart) +
+      '<span class="dash">&ndash;</span>' + minutesToLabel(endMin) + '</div>' +
+      '<div class="ticket-sub">' + DOW[d.getDay()] + ", " + MONTHS[d.getMonth()] + " " + d.getDate() +
+      ' &middot; 30 min session</div>';
+    submitBtn.disabled = false;
+  }
+
+  bookingForm.addEventListener("submit", function(ev){
+    ev.preventDefault();
+    formError.classList.remove("show");
+    formSuccess.classList.remove("show");
+
+    if (selectedStart === null){
+      formError.textContent = "Choose a time on the board first.";
+      formError.classList.add("show");
+      return;
+    }
+    var name = document.getElementById("fName").value.trim();
+    if (!name){
+      formError.textContent = "Please enter your name.";
+      formError.classList.add("show");
+      return;
+    }
+
+    // Re-check availability in case it changed.
+    var occ = occupancyMap(selectedDayKey);
+    if (occ[selectedStart] || occ[selectedStart + STEP]){
+      formError.textContent = "That slot was just taken — pick another time.";
+      formError.classList.add("show");
+      selectedStart = null;
+      renderBoard();
+      renderTicket();
+      return;
+    }
+
+    var note = document.getElementById("fNote").value.trim();
+    var booking = {
+      id: "b-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      start: selectedStart,
+      name: name,
+      note: note
+    };
+    if (!allBookings[selectedDayKey]) allBookings[selectedDayKey] = [];
+    allBookings[selectedDayKey].push(booking);
+    saveAll(allBookings);
+
+    var bookedStart = selectedStart;
+    selectedStart = null;
+    bookingForm.reset();
+    renderBoard();
+    renderTicket();
+    renderMine();
+    formSuccess.classList.add("show");
+
+    var rowEl = boardRowsEl.querySelector('[data-start="' + bookedStart + '"]');
+    if (rowEl){
+      rowEl.classList.add("just-booked");
+      rowEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      setTimeout(function(){ rowEl.classList.remove("just-booked"); }, 950);
+    }
+  });
+
+  // ---------------------------------------------------------
+  // My reservations for the selected day
+  // ---------------------------------------------------------
+  var mineListEl = document.getElementById("mineList");
+  var mineDateEl = document.getElementById("mineDate");
+
+  function renderMine(){
+    var d = keyToDate(selectedDayKey);
+    mineDateEl.textContent = MONTHS[d.getMonth()] + " " + d.getDate();
+    var list = bookingsForDay(selectedDayKey).slice().sort(function(a,b){ return a.start - b.start; });
+    if (!list.length){
+      mineListEl.innerHTML = '<p class="mine-empty">No reservations yet for this day.</p>';
+      return;
+    }
+    mineListEl.innerHTML = "";
+    list.forEach(function(b){
+      var item = document.createElement("div");
+      item.className = "mine-item";
+      item.innerHTML =
+        '<div class="mi-info">' +
+          '<span class="mi-time">' + minutesToLabel(b.start) + '&ndash;' + minutesToLabel(b.start + SESSION_LEN) + '</span>' +
+          '<span class="mi-name">' + escapeHtml(b.name || "Reserved") + (b.note ? " — " + escapeHtml(b.note) : "") + '</span>' +
+        '</div>';
+      var releaseBtn = document.createElement("button");
+      releaseBtn.type = "button";
+      releaseBtn.className = "btn-ghost";
+      releaseBtn.textContent = "Release";
+      releaseBtn.addEventListener("click", function(){
+        allBookings[selectedDayKey] = bookingsForDay(selectedDayKey).filter(function(x){ return x.id !== b.id; });
+        saveAll(allBookings);
+        renderBoard();
+        renderMine();
+      });
+      item.appendChild(releaseBtn);
+      mineListEl.appendChild(item);
+    });
+  }
+
+  // ---------------------------------------------------------
+  // View switching
+  // ---------------------------------------------------------
+  var viewMode = "day";
+  var dayLayoutEl = document.getElementById("dayLayout");
+  var weekViewEl = document.getElementById("weekView");
+  var monthViewEl = document.getElementById("monthView");
+
+  function goToDay(key){
+    selectedDayKey = key;
+    selectedStart = null;
+    setView("day");
+  }
+
+  function setView(mode){
+    viewMode = mode;
+    document.querySelectorAll(".view-btn").forEach(function(b){
+      b.setAttribute("aria-pressed", String(b.dataset.view === mode));
+    });
+    dayLayoutEl.hidden = mode !== "day";
+    dayTabsEl.hidden = mode !== "day";
+    weekViewEl.hidden = mode !== "week";
+    monthViewEl.hidden = mode !== "month";
+
+    if (mode === "day"){
+      renderDayTabs();
+      renderBoard(true);
+      renderTicket();
+      renderMine();
+    } else if (mode === "week"){
+      renderWeek();
+    } else if (mode === "month"){
+      renderMonth();
+    }
+  }
+
+  document.getElementById("viewSwitch").addEventListener("click", function(ev){
+    var btn = ev.target.closest(".view-btn");
+    if (btn) setView(btn.dataset.view);
+  });
+
+  // ---------------------------------------------------------
+  // Week view
+  // ---------------------------------------------------------
+  var weekAnchor = startOfWeek(today);
+  var weekGridEl = document.getElementById("weekGrid");
+  var wkTitleEl = document.getElementById("wkTitle");
+
+  function renderWeek(){
+    var weekDates = [];
+    for (var i = 0; i < 7; i++) weekDates.push(addDays(weekAnchor, i));
+    var last = weekDates[6];
+    wkTitleEl.textContent =
+      (weekAnchor.getMonth() === last.getMonth()
+        ? MONTHS[weekAnchor.getMonth()] + " " + weekAnchor.getDate() + "–" + last.getDate()
+        : MONTHS[weekAnchor.getMonth()] + " " + weekAnchor.getDate() + " – " + MONTHS[last.getMonth()] + " " + last.getDate()) +
+      ", " + last.getFullYear();
+
+    weekGridEl.innerHTML = "";
+
+    // header row
+    var corner = document.createElement("div");
+    corner.className = "wk-corner";
+    weekGridEl.appendChild(corner);
+    weekDates.forEach(function(d){
+      var head = document.createElement("button");
+      head.type = "button";
+      head.className = "wk-daycol-head" + (dateKey(d) === dateKey(today) ? " is-today" : "");
+      head.innerHTML = '<div class="dow">' + DOW[d.getDay()] + '</div><div class="dom">' + d.getDate() + '</div>';
+      head.addEventListener("click", function(key){ return function(){ goToDay(key); }; }(dateKey(d)));
+      weekGridEl.appendChild(head);
+    });
+
+    // hour rail
+    var rail = document.createElement("div");
+    rail.className = "wk-hourrail";
+    for (var h = 9; h <= 17; h++){
+      var lbl = document.createElement("div");
+      lbl.className = "hr-label";
+      lbl.style.top = ((h * 60 - OPEN_MIN) / DAY_RANGE * 100) + "%";
+      lbl.textContent = minutesToShort(h * 60);
+      rail.appendChild(lbl);
+    }
+    weekGridEl.appendChild(rail);
+
+    var nowMin = today.getHours() * 60 + today.getMinutes();
+
+    weekDates.forEach(function(d){
+      var key = dateKey(d);
+      var col = document.createElement("div");
+      col.className = "wk-col" + (key === dateKey(today) ? " is-today" : "");
+
+      var breakTop = (BLOCKS[0].end - OPEN_MIN) / DAY_RANGE * 100;
+      var breakHeight = (BLOCKS[1].start - BLOCKS[0].end) / DAY_RANGE * 100;
+      var brk = document.createElement("div");
+      brk.className = "wk-break";
+      brk.style.top = breakTop + "%";
+      brk.style.height = breakHeight + "%";
+      col.appendChild(brk);
+
+      bookingsForDay(key).forEach(function(b){
+        var block = document.createElement("div");
+        block.className = "wk-block";
+        block.style.top = ((b.start - OPEN_MIN) / DAY_RANGE * 100) + "%";
+        block.style.height = (SESSION_LEN / DAY_RANGE * 100) + "%";
+        block.textContent = minutesToShort(b.start) + " " + (b.name || "Reserved");
+        block.title = minutesToLabel(b.start) + "–" + minutesToLabel(b.start + SESSION_LEN) + " · " + (b.name || "Reserved");
+        col.appendChild(block);
+      });
+
+      if (key === dateKey(today) && nowMin >= OPEN_MIN && nowMin <= CLOSE_MIN){
+        var nowLine = document.createElement("div");
+        nowLine.className = "wk-now";
+        nowLine.style.top = ((nowMin - OPEN_MIN) / DAY_RANGE * 100) + "%";
+        col.appendChild(nowLine);
+      }
+
+      col.addEventListener("click", function(k){ return function(){ goToDay(k); }; }(key));
+      weekGridEl.appendChild(col);
+    });
+  }
+
+  document.getElementById("wkPrev").addEventListener("click", function(){ weekAnchor = addDays(weekAnchor, -7); renderWeek(); });
+  document.getElementById("wkNext").addEventListener("click", function(){ weekAnchor = addDays(weekAnchor, 7); renderWeek(); });
+  document.getElementById("wkToday").addEventListener("click", function(){ weekAnchor = startOfWeek(today); renderWeek(); });
+
+  // ---------------------------------------------------------
+  // Month view
+  // ---------------------------------------------------------
+  var monthAnchor = new Date(today.getFullYear(), today.getMonth(), 1);
+  var monthGridEl = document.getElementById("monthGrid");
+  var monthDowRowEl = document.getElementById("monthDowRow");
+  var moTitleEl = document.getElementById("moTitle");
+  var SHORT_DOW = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+
+  function monthMatrix(anchor){
+    var firstOfMonth = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    var lastOfMonth = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
+    var gridStart = startOfWeek(firstOfMonth);
+    var gridEnd = addDays(startOfWeek(lastOfMonth), 6);
+    var weeks = [];
+    var cur = new Date(gridStart);
+    while (cur <= gridEnd){
+      var row = [];
+      for (var i = 0; i < 7; i++){ row.push(new Date(cur)); cur = addDays(cur, 1); }
+      weeks.push(row);
+    }
+    return weeks;
+  }
+
+  function renderMonth(){
+    moTitleEl.textContent = MONTHS_FULL[monthAnchor.getMonth()] + " " + monthAnchor.getFullYear();
+
+    monthDowRowEl.innerHTML = "";
+    SHORT_DOW.forEach(function(dow){
+      var el = document.createElement("div");
+      el.className = "mo-dow";
+      el.textContent = dow;
+      monthDowRowEl.appendChild(el);
+    });
+
+    var weeks = monthMatrix(monthAnchor);
+    monthGridEl.innerHTML = "";
+    weeks.forEach(function(week){
+      week.forEach(function(d){
+        var key = dateKey(d);
+        var inMonth = d.getMonth() === monthAnchor.getMonth();
+        var count = bookingsForDay(key).length;
+        var cell = document.createElement("button");
+        cell.type = "button";
+        cell.className = "mo-cell" +
+          (inMonth ? "" : " out") +
+          (key === dateKey(today) ? " is-today" : "");
+        cell.innerHTML = '<span class="mo-date">' + d.getDate() + '</span>' +
+          (count > 0 ? '<span class="mo-count"><i></i>' + count + " booked</span>" : "");
+        cell.addEventListener("click", function(k){ return function(){ goToDay(k); }; }(key));
+        monthGridEl.appendChild(cell);
+      });
+    });
+  }
+
+  document.getElementById("moPrev").addEventListener("click", function(){ monthAnchor = addMonths(monthAnchor, -1); renderMonth(); });
+  document.getElementById("moNext").addEventListener("click", function(){ monthAnchor = addMonths(monthAnchor, 1); renderMonth(); });
+  document.getElementById("moToday").addEventListener("click", function(){ monthAnchor = new Date(today.getFullYear(), today.getMonth(), 1); renderMonth(); });
+
+  // ---------------------------------------------------------
+  // Init
+  // ---------------------------------------------------------
+  setView("day");
+})();
+</script>
+</body>
+</html>
