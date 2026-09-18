@@ -375,6 +375,40 @@ included for completeness and flagged; check those before acting.
 
 ---
 
+### 8.1 Addendum (added with the iRacing parity analysis)
+
+**Finding 283 - `steering_pct` is wrong by a factor of two on iRacing.** `src/ssc_engineer/iracing_reader.py:285`:
+
+```python
+put("steering_pct", max(-100.0, min(100.0, angle / (angle_max / 2.0) * 100.0)))
+```
+
+`SteeringWheelAngleMax` is documented verbatim as *"the steering wheel angle in radians at which the car
+reaches full lock"* - full lock in **one** direction (verified against
+`sajax.github.io/irsdkdocs/telemetry/steeringwheelanglemax.html`). So `angle / angle_max` already spans
+-1..1 and the correct divisor is `angle_max`, not `angle_max / 2.0`. As shipped the value saturates the
+clamp at **half lock** and is flat across the entire outer half of the steering range. It does not merely
+scale wrong, it destroys information. Severity: **high**. Fix: `angle / angle_max * 100.0`.
+
+**Finding 284 - iRacing's `-1` sentinel is published as a lap time.** `iracing_reader.py:224-225` maps
+`LapLastLapTime` and `LapBestLapTime` through `numeric()` (`:177-180`), which has no positivity guard -
+verified, the function is three lines and applies only a `None` check. iRacing uses `-1` for "no valid lap
+yet", so before the first clean lap the snapshot publishes `best_lap_s = -1.0` into the pace and fuel
+models. Severity: **high**. Fix: a `value > 0` guard on both.
+
+**Finding 285 - a working safety warning is discarded for an unrelated reason.**
+`source_capabilities.py:68-75` adds both `"CAR"` and `"DAMAGE"` to `unsupported_categories` when `wheels`
+is missing. `POWERTRAIN_OVERHEAT` (`decision.py:305-317`) is category `"CAR"` and is driven by
+`snapshot.overheating`, which the iRacing reader **already populates** from `EngineWarnings`
+(`iracing_reader.py:319-322`). A real overheat warning is therefore silently dropped on iRacing because a
+tyre field is unmapped. Severity: **high**. Fix: gate `"DAMAGE"` on the damage fields and `"CAR"` only on
+what `CarHealthState` actually needs. Roughly two lines.
+
+These three were found while answering the iRacing parity question (Section 11), not by the original audit
+pass. The audit's totals elsewhere in this document are unchanged at 282; these are numbered onward from it.
+
+---
+
 ## 9. What I would actually do, in order
 
 1. **Rebuild the voice guardrail as default-deny.** Not more phrases — a different model. Structured
@@ -416,6 +450,279 @@ driver mid-stint.
 Fix the measurement, and the code quality is already there.
 
 ---
+
+---
+
+## 11. iRacing parity: what it would actually take
+
+*Added after the audit, answering a direct question: what would it take to make iRacing not read-only,
+with the same functionality as LMU. Method: a 10-agent workflow with a dedicated adversarial fact-check
+stage on every SDK variable claim, fetching primary sources rather than recalling them. Full analysis in
+Appendix B.*
+
+### 11.1 The premise is half wrong, and the wrong half matters
+
+"Read-only" names two different things in this codebase, and the docs conflate them.
+
+**Sense 1 - the app never writes to the sim.** Verified: `reader.py:109` opens the LMU map with
+`access_mode=0`; `iracing_sdk.py:86,92` open the iRacing map with `FILE_MAP_READ`; there is no pit-command
+or car-control path to **either** sim anywhere in the 83k LOC. `docs/user/IRACING_SUPPORT.md:7` states this
+for iRacing, and `SECURITY.md:41` states it product-wide. **LMU is read-only in exactly the same sense.**
+This is not an iRacing restriction and there is no parity gap here.
+
+**Sense 2 - the app reads fewer channels from iRacing.** This is what actually makes iRacing a lesser
+citizen, and it is the real question.
+
+### 11.2 Correction to the measurement published earlier
+
+Earlier in this session I reported "110 `RaceSnapshot` fields, 48 available, 62 unavailable" from running
+the repo's own fixture through the reader. **That number is fixture-derived, not capability-derived, and
+it overstates the gap.** `numeric()` (`iracing_reader.py:177-180`) only calls `put()` when the SDK key is
+present, so a thin fixture inflates `unavailable_fields`. Six fields are already mapped in the reader and
+only looked missing because `tests/engineering/test_iracing_reader.py` does not supply their source
+variables:
+
+| Field | Already mapped at |
+|---|---|
+| `time_of_day_s` | `iracing_reader.py:223` |
+| `best_lap_s` | `:225` |
+| `delta_best_s` | `:270-271` |
+| `steering_pct` | `:282-285` |
+| `source_session_id` | `:199-208` |
+| `source_track_key` | `:252-263` |
+
+**The real gap is about 56, not 62.** Anyone acting on the list must re-derive it from the code, not the
+fixture, or they will write duplicate mappings. That the fixture is this thin is itself a finding - see
+Stage 2 in Appendix B.
+
+### 11.3 Field mapping only opens one of three gates
+
+My working claim was that parity is "almost entirely a question of filling fields in one 456-line file."
+That is true of the data plumbing and **false of the product**. There are three independent gates, and
+filling every field leaves two of them fully intact.
+
+**Gate 1 - `unavailable_fields`, data-driven.** `iracing_reader.py:328` into
+`source_capabilities.py:37-142`. The only gate field mapping touches.
+
+**Gate 2 - a hardcoded simulator denylist in the voice layer.** Verified at
+`src/ssc_engineer/voice/tool_status.py:61-76`: thirteen voice tools are refused on
+`context.simulator == "iracing"` regardless of data, returning *"This advanced engineering tool is not yet
+validated for iRacing"*. `get_race_control_status` is on that list even though `under_yellow` and
+`primary_flag` **are** populated for iRacing at `iracing_reader.py:295-318`. No amount of field work
+unlocks these. Deleting this block is the single highest payoff per hour in the whole plan.
+
+**Gate 3 - `simulator != "lmu"` checks scattered outside the reader.** Ten verified sites, including
+`pit_operations.py:438`:
+
+```python
+if snapshot.simulator != "lmu" or "pitstops" in snapshot.unavailable_fields:
+```
+
+Note the `or`. Mapping `pitstops` - the hardest single field in the plan - changes **nothing** here until
+the name check goes. The other nine: `strategy_projection_live.py:229`, `strategy_gap.py:75`,
+`qualifying.py:44`, `voice/tool_status.py:638`, `persistence/driver_capabilities.py:185`,
+`persistence/live_predictions.py:144`, `persistence/traffic_prediction_endpoints.py:233`,
+`persistence/practice_execution.py:163`, `lico/integrated.py:221`.
+
+### 11.4 The 62 fields, classified against the real SDK
+
+| Verdict | Count |
+|---|---|
+| Already mapped (fixture artefact) | 6 |
+| DIRECT - a confirmed SDK variable exists | 13 |
+| DERIVABLE - computable from confirmed variables | 17 |
+| SESSION_INFO - in the session YAML | 2 |
+| PIT_REFRESH_ONLY - exists but is not live data | 1 (`wheels`) |
+| UNCONFIRMED - could not be verified against any source | 4 |
+| **IMPOSSIBLE - iRacing does not model it** | **19** |
+
+| Field | Verdict | iRacing source | Effort | Note |
+|---|---|---|---|---|
+| `abs_active` | DIRECT | `BrakeABSactive` | trivial | A true live intervention flag and a clean match for LMU's mABSActive - this one is core telem... |
+| `abs_setting` | DIRECT | `dcABS (car-dependent channel)` | trivial | Car-dependent - probe before reading, and note that dcABS being missing is the normal case fo... |
+| `battery_soc_pct` | DIRECT | `EnergyERSBatteryPct (float); EnergyERSBattery (int, Joules) as ...` | trivial | THIS CONTRADICTS THE REPO'S OWN DOCS |
+| `best_lap_s` | ALREADY MAPPED | `LapBestLapTime` | trivial | NOT actually unmapped - iracing_reader |
+| `brake_bias_front_pct` | DIRECT | `dcBrakeBias (car-dependent channel)` | small | IMPORTANT: dc* channels are car-specific and are appended to the end of the varHeader table p... |
+| `cloud` | DIRECT | `Telemetry var `Skies`; static fallback `WeekendInfo:TrackSkies`...` | small | LMU side (reader |
+| `delta_best_s` | ALREADY MAPPED | `LapDeltaToBestLap, gated on LapDeltaToBestLap_OK` | trivial | Already mapped correctly at iracing_reader |
+| `front_arb` | DIRECT | `dcAntiRollFront (car-dependent channel)` | trivial | Car-dependent - probe before reading |
+| `local_acceleration_mps2` | DIRECT | `LongAccel, LatAccel, VertAccel` | small | Units match |
+| `local_rotation_rad_s` | DIRECT | `YawRate, PitchRate, RollRate` | small | Units match LMU's rad/s directly, no scaling |
+| `local_velocity_mps` | DIRECT | `VelocityX, VelocityY, VelocityZ` | small | Units already match (m/s, no scaling) |
+| `rain_pct` | DIRECT | `Telemetry var `Precipitation` (optionally cross-checked against...` | trivial | LMU side (reader |
+| `rear_arb` | DIRECT | `dcAntiRollRear (car-dependent channel)` | trivial | Identical treatment to front_arb - same probe, same int cast, same car-dependence |
+| `steering_pct` | ALREADY MAPPED | `SteeringWheelAngle / SteeringWheelAngleMax` | trivial | Already mapped at iracing_reader |
+| `tc` | DIRECT | `dcTractionControl (car-dependent channel)` | trivial | Car-dependent; probe first |
+| `time_behind_leader_s` | DIRECT | `CarIdxF2Time[PlayerCarIdx]` | small | This is a genuine direct match, but ONLY in a race session |
+| `time_of_day_s` | ALREADY MAPPED | `Telemetry var `SessionTimeOfDay` — ALREADY MAPPED` | trivial | CORRECTION TO THE TASK PREMISE |
+| `championship` | SESSION_INFO | ``WeekendInfo:SeriesID`, `WeekendInfo:SeasonID`, `WeekendInfo:Le...` | small | LMU side (reader |
+| `source_session_id` | ALREADY MAPPED | `WeekendInfo:SessionID + WeekendInfo:SubSessionID + telemetry Se...` | trivial | NOT unmapped - iracing_reader |
+| `source_track_key` | ALREADY MAPPED | `WeekendInfo:TrackID + WeekendInfo:TrackConfigName + WeekendInfo...` | trivial | NOT unmapped - iracing_reader |
+| `track_grip` | SESSION_INFO | ``SessionInfo:Sessions:<n>:SessionTrackRubberState` (string); co...` | small | LMU side (reader |
+| `current_s1_s` | DERIVABLE | `SessionTime + LapDistPct + session-info YAML SplitTimeInfo:Sect...` | medium | iRacing publishes sector BOUNDARIES but never sector TIMES |
+| `current_s2_elapsed_s` | DERIVABLE | `SessionTime + LapDistPct + SplitTimeInfo:Sectors[]:SectorStartPct` | medium | LMU's mCurSector2 is cumulative elapsed time at the S2 boundary (not the S2 split), so derive... |
+| `electric_motor_state` | DERIVABLE | `ManualBoost (boolean), ManualNoBoost (boolean), P2P_Status (boo...` | small | Low-fidelity only |
+| `gap_car_ahead_s` | DERIVABLE | `CarIdxEstTime (preferred) or CarDistAhead + Speed` | medium | There is NO measured time gap in iRacing |
+| `gap_car_behind_s` | DERIVABLE | `CarIdxEstTime (preferred) or CarDistBehind + Speed` | medium | Exactly symmetric to gap_car_ahead_s and carries exactly the same error |
+| `gap_place_ahead_s` | DERIVABLE | `CarIdxPosition (to find position-1) + CarIdxEstTime + CarIdxLap...` | medium | LMU's mTimeGapPlaceAhead is the gap to the car one place ahead in the classification, which m... |
+| `gap_place_behind_s` | DERIVABLE | `CarIdxPosition (to find position+1) + CarIdxEstTime + CarIdxLap...` | medium | Symmetric to gap_place_ahead_s with the same lapped-car caveat |
+| `laps_behind_leader` | DERIVABLE | `CarIdxLapCompleted + CarIdxPosition (leader = position 1)` | small | leader_idx = the index where CarIdxPosition == 1; value = CarIdxLapCompleted[leader] - LapCom... |
+| `last_impact_age_s` | DERIVABLE | `SessionTime, combined with a locally-detected impact event (Pla...` | medium | The one damage field that transfers cleanly, and it mirrors the LMU derivation exactly: LMU c... |
+| `penalties` | DERIVABLE | `Telemetry var `SessionFlags` (enum `irsdk_Flags`), driver black...` | small | LMU side (reader |
+| `pitstops` | DERIVABLE | `OnPitRoad / PlayerCarInPitStall / PitstopActive (edge counting)...` | medium | iRacing genuinely does not publish what LMU's mNumPitstops gives you |
+| `regen_kw` | DERIVABLE | `EnergyERSBattery (int, Joules) differentiated against SessionTime` | medium | Derivable but NOT equivalent |
+| `sector` | DERIVABLE | `LapDistPct + SplitTimeInfo:Sectors[]:SectorStartPct` | small | LMU stores a string label ("S1"/"S2"/"S3"/"--", reader |
+| `sector_yellow` | DERIVABLE | ``CarIdxSessionFlags` (per-car `irsdk_Flags` array) + `CarIdxLap...` | medium | LMU side (reader |
+| `start_light` | DERIVABLE | ``SessionFlags` start bits: `irsdk_startHidden` = 0x10000000, `i...` | small | LMU's `mStartLight` (lmu_data |
+| `wetness_avg_pct` | DERIVABLE | `Telemetry var `TrackWetness` (enum `irsdk_TrackWetness`)` | small | LMU side (reader |
+| `yellow_flag_state` | DERIVABLE | ``SessionFlags` bits `irsdk_caution` = 0x00004000, `irsdk_cautio...` | medium | LMU side (reader |
+| `wheels` | PIT_REFRESH_ONLY | `LFwearL/LFwearM/LFwearR, LFtempCL/LFtempCM/LFtempCR, LFcoldPres...` | medium | PARTIAL AT BEST - and the partial is a trap |
+| `migration` | UNCONFIRMED | `none I can confirm` | small | Leaning IMPOSSIBLE |
+| `motor_map` | UNCONFIRMED | `none I can confirm; would be a car-specific dc* channel discove...` | small | I will not invent a name |
+| `tc_cut` | UNCONFIRMED | `dcTractionControl2 is the only candidate; no dcTractionControlC...` | medium | LMU's mTCCut is specifically the power-cut aggressiveness knob |
+| `tc_slip` | UNCONFIRMED | `dcTractionControl / dcTractionControl2 - which knob is slip is ...` | medium | Same reasoning as tc_cut |
+| `body_part_detached` | IMPOSSIBLE | `none for the field as defined; nearest proxies are SessionFlags...` | trivial | iRacing publishes no body-damage state channel at all |
+| `dent_severity` | IMPOSSIBLE | `none` | trivial | Genuinely absent |
+| `electric_motor_coolant_temp_c` | IMPOSSIBLE | `none` | trivial | Genuinely absent |
+| `electric_motor_temp_c` | IMPOSSIBLE | `none` | trivial | Genuinely absent from the SDK, not unmapped |
+| `engine_torque_nm` | IMPOSSIBLE | `none` | trivial | HIGH RISK OF A FALSE MAPPING - flag this explicitly |
+| `headlights` | IMPOSSIBLE | `none - dcHeadlightFlash is a momentary flash button, not a ligh...` | small | This is the field most likely to be mis-mapped |
+| `impact_position_m` | IMPOSSIBLE | `none` | trivial | Genuinely absent |
+| `lap_invalid` | IMPOSSIBLE | `none confirmed` | trivial | LMU side (reader |
+| `last_impact_magnitude` | IMPOSSIBLE | `none for the LMU quantity; an impact EVENT is detectable from L...` | medium | Do not fill this field |
+| `lift_and_coast_pct` | IMPOSSIBLE | `none` | trivial | IMPOSSIBLE as this contract field |
+| `num_red_lights` | IMPOSSIBLE | `none` | trivial | LMU's `scoring_info |
+| `physical_steering_wheel_range_deg` | IMPOSSIBLE | `none` | trivial | LMU's mPhysicalSteeringWheelRange is the rotation range of the user's actual wheelbase hardwa... |
+| `tc_active` | IMPOSSIBLE | `none` | small | iRacing has no analogue of LMU's mTCActive |
+| `track_limits_steps` | IMPOSSIBLE | `none` | trivial | LMU's `telemetry |
+| `track_limits_steps_per_penalty` | IMPOSSIBLE | `none` | trivial | This is the static rule constant for a rule iRacing does not have |
+| `track_limits_steps_per_point` | IMPOSSIBLE | `none` | trivial | Identical reasoning |
+| `virtual_energy_pct` | IMPOSSIBLE | `none` | trivial | GENUINELY IMPOSSIBLE, not merely unmapped |
+| `wetness_max_pct` | IMPOSSIBLE | `none` | trivial | Same reasoning as wetness_min_pct |
+| `wetness_min_pct` | IMPOSSIBLE | `none` | trivial | LMU's `mMinPathWetness` comes from a per-path-segment wetness model that iRacing does not exp... |
+
+### 11.5 What the adversarial fact-check caught
+
+The fact-check stage existed because fabricated-but-plausible SDK identifiers are the obvious failure mode
+here. Result: **zero fabricated variable names** across all 62 fields - every identifier appears verbatim
+in a fetched source. The failures were of reasoning, not invention:
+
+- **The repository's own cited reference is incomplete.** `iracing_sdk.py:3-4` cites the vipoo
+  `irsdk_defines.h`, and `docs/user/IRACING_SUPPORT.md` cites kutu's `vars.txt`. Ninety-seven variable
+  names appear **only** in `vars.txt`; nineteen appear **only** in the sajax docs - including
+  `EnergyERSBatteryPct` and the entire hybrid-energy family. `irsdk_TrackWetness` is absent from the
+  vipoo header entirely. "Absent from the cited source" is therefore not evidence of non-existence, and
+  the repo has been reasoning from two incomplete captures.
+- **`battery_soc_pct` contradicts the repo's own documentation.** `docs/user/IRACING_SUPPORT.md:37-40`
+  lumps battery and energy together as "not interchangeable with iRacing fields". That is correct for
+  virtual energy and **wrong** for battery state of charge: `EnergyERSBatteryPct` exists and is published
+  for hybrid content. One row in an existing table.
+- **A unit trap that would have shipped.** iRacing's `%` unit is a 0-1 fraction, not 0-100 - provable from
+  the same file (`Brake  0=brake released to 1=max pedal force, %`). The repo already knows this and scales
+  `Throttle`/`Brake`/`FuelLevelPct` by 100. `rain_pct` needs the same treatment or it reports 1% in a
+  monsoon.
+- **`CarIdxF2Time` is mode-dependent.** It is time-behind-leader **only in a race session**; elsewhere the
+  same array carries a fastest lap time. Mapping it unconditionally publishes a lap time as a deficit to
+  the leader.
+- **`dcTractionControlCut` does not exist.** Zero hits in a 461-entry generated enum and in `vars.txt`. The
+  mapper's refusal to confirm `tc_cut`/`tc_slip` was correct and is upheld.
+
+### 11.6 The ceiling, stated plainly
+
+**Reachable parity:** fuel, pace, position, gaps, flags, race control, weather, pit cycle.
+
+**Permanently out of reach, because iRacing does not model it:**
+
+- **Live tyre pressure and surface temperature.** There is no live pressure channel at all -
+  `LFcoldPressure` is the garage setting, `PitSv*P` is the pending service target, `dp*TireColdPress` is an
+  adjustment request. None is a measurement. And iRacing publishes **carcass** temperature, not surface.
+  Consequence: `car_health.pressure_status == "PRESSURE LOSS OBSERVED"` cannot be honestly driven, and
+  calibrated tyre degradation (`calibration.py:616`, gated on `thermal_data_valid`) is permanently `None`.
+- **Virtual energy.** `mVirtualEnergy` is the WEC/ACO per-stint energy allowance - a regulation iRacing
+  does not race to. `EnergyMGU_KLapDeployPct` resets every lap and measures deploy budget, not a stint
+  consumable; mapping it feeds a per-lap sawtooth into the stint model and produces nonsense refuel
+  targets. `source_capabilities.py:52-64` already handles this correctly and should not be touched.
+- **Per-panel damage, impact geometry, hybrid motor internals, LMU's track-limits rule engine.**
+
+**The tyre trap.** The obvious move - populate `wheels` from the wear and temperature channels - is the
+one thing not to do. Those channels refresh only in the pit stall, and
+`source_capabilities.py:65-66,113` key tyre advice and the strategy gate off `wheels` being absent.
+Filling it makes the strategy layer consume stall-frozen numbers as live evidence, which is precisely what
+`iracing_reader.py:3-4` forbids. The honest build is a separately-named pit-refreshed tyre report carrying
+its own refresh timestamp, with `wheels` left unavailable.
+
+**The highest-value line in the entire plan is not a mapping.** `source_capabilities.py:113` discards the
+**whole** `StrategyScenarioState` if any one of `{wheels, wetness_avg_pct, pitstops, fuel_l}` is missing -
+14 scenarios in, 0 out, all-or-nothing. Splitting that gate per-scenario, so the fuel and weather scenarios
+(`STAY_OUT`, `PIT_NOW`, `PIT_NEXT_LAP`, `SAVE_FUEL`, `REACT_TO_RAIN`, `WAIT_FOR_CROSSOVER`) stop being held
+hostage by a tyre field iRacing can never supply, is **about one day** and is worth more than the entire
+tyre mapping.
+
+### 11.7 Sequencing
+
+| Stage | Days | Ships alone? |
+|---|---|---|
+| 1 - Fix findings 283-285 (steering, `-1` lap times, overheat) | 2-3 | Yes |
+| 2 - Type-faithful test fixture + raw-frame recorder | 2-3 | No - prerequisite; re-measures the real gap |
+| 3 - Delete Gate 2, audit Gate 3 | 2-3 | Yes - 4 voice tools become data-gated |
+| 4 - Sim-partition the persisted models | 5-8 | Yes - fixes a live data-contamination bug |
+| 5 - Cheap confirmed scalars | 3-5 | Yes - UI/voice richness |
+| 6 - Weather, flags, race control | 4-6 | Yes - WeatherState, PenaltyState, correct yellow state |
+| 7 - Gaps and relative timing | 5-7 | Yes |
+| 8 - `pitstops` + the reader's statefulness decision | 5-8 | Yes - pit cycle, execution, service error, caution |
+| 9 - Honest tyre channel + split the scenario gate | 8-12 | Yes - the gate split alone (~1d) is most of the value |
+| 10 - Sectors | 5-8 | Marginal - last, or not at all |
+| **Read parity total** | **41-63** | |
+| Write path (separate decision) | 6-10 + read-back | Independent of all of the above |
+
+Stages 1-4 are cheap, mostly **not** parity work, and fix defects that exist today. Stage 4 in particular
+is a live correctness bug: `persistence/profiles.py:429-437` hard-allowlists five WHERE clauses and does
+not permit `api_version`, so `estimated_lap_s` and `estimated_fuel_per_lap_l` are pooled across LMU and
+iRacing physics at `HIGH` confidence, and `cli.py:84-87` writes iRacing data into the LMU database.
+
+### 11.8 The write path is a different product, not a parity stage
+
+Nothing above is blocked by the lack of write access. Treat it as its own decision.
+
+**The API is real and first-party.** `irsdk_defines.h:358-374` defines `irsdk_BroadcastPitCommand`;
+`:384-398` defines `irsdk_PitCommandMode` (`Clear`, `WS`, `Fuel` in litres, `LF`/`RF`/`LR`/`RR` in kPa,
+`ClearTires`, `FR`, `ClearWS`, `ClearFR`, `ClearFuel`), with the header comment *"this only works when the
+driver is in the car"*. Transport is `RegisterWindowMessage("IRSDK_BROADCASTMSG")` then
+`SendNotifyMessage` - about 40 lines of ctypes. Every command has an in-sim equivalent the driver already
+has bound to a key.
+
+**It would not produce parity. It would produce asymmetry.** LMU's shared memory has no write plane. LMU
+has an undocumented local pit-menu HTTP endpoint (`localhost:6397`) used by third-party tools, but its body
+shape is undocumented and the port unversioned - and this repo has never touched it (grep for
+`6397|rest/garage` across `src/` and `docs/` returns nothing). So "the same functionality across both sims"
+on the write side is reachable only as a user-facing abstraction over two adapters whose failure modes are
+not alike: iRacing ahead on confidence, behind on scope; LMU the reverse.
+
+**Three properties to design around:** the send is fire-and-forget with no acknowledgement, so the
+**write-then-verify read-back loop is the feature** - and none of `PitSvFlags`, `PitSvFuel`, `PitSv*P` or
+`PlayerCarPitSvStatus` is mapped today; the parameter is quantised to whole litres and whole kPa, so the
+app must decide and state its rounding; and `PitCommand_FR` consumes a limited resource that `ClearFR`
+cannot return once the stop is taken.
+
+**It breaks a stated, tested contract - deliberately, and that must be explicit.** `SECURITY.md:41` files
+simulator control under things a violation of which *is a security issue*, and `voice/config.py:131-133`
+puts *"You cannot control LMU, the car, pit menu, iRacing, or setup"* in the model's own system prompt. The
+existing tests draw the line at the **remote/team** layer, not the local one
+(`tests/team/test_team_operations_v013.py:81,124`, `tests/engineering/test_pit_operations_v102.py:185`).
+Those three assertions should stay true. Rewrite `SECURITY.md:41` precisely rather than deleting it.
+
+**And one hard prerequisite.** Section 4 of this report shows `voice/guardrails.py` authorises
+`"Box, box, box"` from a substring match on the string `"PIT ENTRY OBSERVED"`. That hole has never been
+load-bearing **because the app cannot act**. Giving the app a pit-command channel while that guardrail
+stands converts a validation defect into a hand on the pit menu. Do not route a pit command through the
+transcript guardrail, and do not build this before Section 9 item 1 is done.
+
+**If you build it:** driver-confirmed pit-service requests only. Out of scope: force-feedback commands,
+camera, chat, and categorically any synthetic input - there is no API for car control, so the only way to
+build that is input injection. The line is not *"does the app write?"* but *"does the write go through a
+documented sim API that a human could have triggered from the sim's own UI, while the car stays under human
+control?"*
+
 
 ## Appendix A — All 282 findings
 
@@ -5394,3 +5701,962 @@ git tag -a v1.0.4-rc.1 <build-commit> -m "1.0.4 local candidate, unsigned; insta
 **Impact.** An unused runtime dependency is pinned into a 1,477-line lockfile that no Dependabot entry watches and no SBOM records. It inflates the install closure, adds an unmonitored supply-chain surface, and misleads anyone reading package.json into thinking StyleX is the styling system when AGENTS.md mandates Astryx tokens. Minor in isolation; it is listed because it is one more symptom of a component nobody has opened since it was written.
 
 **Fix.** Remove the dependency and re-run `pnpm install --lockfile-only` to prune it, or — if the component is being deleted per the earlier finding — this resolves itself.
+
+
+## Appendix B - iRacing parity: the full analysis
+
+*Produced by a 10-agent workflow with a dedicated adversarial fact-check stage on every SDK variable claim. Primary sources fetched, not recalled from memory.*
+
+
+---
+
+### B.1 Staged implementation plan
+
+#### iRacing parity: staged implementation plan
+
+##### The answer to your question, in three sentences
+
+"Read-only" in this codebase means two separate things that get conflated: the app never *writes* to either sim (verified — `reader.py:109` opens LMU with `access_mode=0`, `iracing_sdk.py:86,92` open the iRacing map with `FILE_MAP_READ`, and there is no pit-command or car-control path to *either* sim anywhere in the 83k src LOC), and the app *reads fewer channels* from iRacing than from LMU, which is what actually makes iRacing feel like a lesser citizen. Read parity is achievable for most of what matters but not all of it: of the 110 `RaceSnapshot` fields, ~6 of the "62 unavailable" are already mapped and only look missing because the test fixture is thin (`tests/engineering/test_iracing_reader.py`), roughly 30 more are genuinely mappable or derivable, and roughly 20 describe physics and regulations iRacing does not model at all. The honest ceiling is: **full parity on fuel, pace, gaps, position, weather-ish, flags and race control; permanent non-parity on live tyre pressure/surface temperature, per-panel damage, impact geometry, virtual energy, LMU's track-limits rule engine and hybrid motor internals** — and note that "same functionality across both sims" via the iRacing broadcast API would not give parity, it would make iRacing the *only* sim the app can command, which is a new product, not gap closure (see the write-path section at the end).
+
+---
+
+##### Premise correction before you start (verified against the code, not re-derived)
+
+Your framing says parity is "almost entirely a QUESTION OF FILLING FIELDS IN ONE 456-LINE FILE." That is true for the data plumbing and false for the product. There are **three independent gates**, and filling all 62 fields leaves two of them fully intact:
+
+**Gate 1 — `unavailable_fields` (data-driven).** `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py:328` → `/home/user/ssc-race-engineer/src/ssc_engineer/source_capabilities.py:37-142`. This is the gate your task describes, and it is the only one that field mapping touches.
+
+**Gate 2 — a hardcoded simulator denylist in the voice layer.** `/home/user/ssc-race-engineer/src/ssc_engineer/voice/tool_status.py:61-76` blocks 13 voice tools on `context.simulator == "iracing"` regardless of data. `get_race_control_status` is on that list even though `under_yellow` and `primary_flag` *are* populated for iRacing at `iracing_reader.py:295-318`. No field work unlocks these.
+
+**Gate 3 — `simulator != "lmu"` checks scattered outside the reader.** Verified sites: `pit_operations.py:438` (note the `or` — mapping `pitstops` alone still returns UNAVAILABLE), `strategy_projection_live.py:229`, `strategy_gap.py:75`, `qualifying.py:44`, `voice/tool_status.py:638`, `persistence/driver_capabilities.py:185`, `persistence/live_predictions.py:144`, `persistence/traffic_prediction_endpoints.py:233`, `persistence/practice_execution.py:163`, `lico/integrated.py:221`.
+
+**Also correct the baseline.** `numeric()` at `iracing_reader.py:177-180` only calls `put()` when the SDK key is present, so a thin fixture inflates `unavailable_fields`. Already mapped today but counted as missing: `time_of_day_s` (`:223`), `best_lap_s` (`:225`), `delta_best_s` (`:270-271`), `steering_pct` (`:282-285`), `source_session_id` (`:199-208`), `source_track_key` (`:252-263`). Real gap ≈56.
+
+---
+
+##### Stage 1 — Fix what is already broken (2-3 days). Small. Do this first regardless of everything else.
+
+Three live defects, none of which are parity work, all of which are in the parity blast radius.
+
+**1a. `steering_pct` is wrong by 2x.** `iracing_reader.py:285`:
+```python
+put("steering_pct", max(-100.0, min(100.0, angle / (angle_max / 2.0) * 100.0)))
+```
+`SteeringWheelAngleMax` is the angle at full lock, so the correct divisor is `angle_max`, not `angle_max / 2.0`. As shipped, the output saturates at half lock and is flat across the entire outer half of the steering range — it does not just scale wrong, it destroys information. Replace with `angle / angle_max * 100.0`.
+
+**1b. `best_lap_s` / `last_lap_s` carry `-1` as if it were a lap time.** `iracing_reader.py:224-225` maps `LapLastLapTime` and `LapBestLapTime` through `numeric()`, which has no positivity guard. iRacing uses `-1` as the "no valid lap yet" sentinel. Before the first clean lap the snapshot publishes `best_lap_s = -1.0`. Add a `value > 0` guard — either a `minimum:` kwarg on `numeric()` or two explicit blocks after the table at `:237`.
+
+**1c. An already-working safety warning is being thrown away.** `source_capabilities.py:68-75` adds both `"CAR"` and `"DAMAGE"` to `unsupported_categories` when `wheels` is missing. `POWERTRAIN_OVERHEAT` (`decision.py:305-317`) is category `"CAR"` and is driven by `snapshot.overheating`, which the reader **already populates** from `EngineWarnings` at `iracing_reader.py:319-322`. A real overheat warning is silently discarded on iRacing because an unrelated field is unmapped. Split the condition: `"DAMAGE"` stays gated on the damage fields, `"CAR"` gates only on the channels `CarHealthState` actually needs. ~2 lines.
+
+*(Related, unresolved: `iracing_reader.py:321` tests `int(warnings) & 0x41`, but `irsdk_EngineWarnings` in the fetched vipoo header defines only `0x01`…`0x20`. Bit `0x40` is undefined in that source. Do not "fix" it blind — flag it and confirm against a live session.)*
+
+**Unlocks:** correct steering telemetry everywhere it is consumed; no phantom `-1` lap times poisoning pace/fuel models on lap 1; overheat warnings reach the driver on iRacing.
+
+**Test:** `tests/engineering/test_iracing_reader.py` — assert `steering_pct == 100.0` at `angle == angle_max` (today it clamps there from 200), assert `best_lap_s` is in `unavailable_fields` when `LapBestLapTime == -1.0`, and a `source_capabilities` test asserting `POWERTRAIN_OVERHEAT` survives the strip with `wheels` missing.
+
+---
+
+##### Stage 2 — Make the test fixture type-faithful (2-3 days). Prerequisite for every later stage.
+
+`tests/engineering/test_iracing_reader.py:100-103` infers the SDK var type from the Python type and emits **only kinds 1 (bool), 2 (int), 5 (double)**. `irsdk_VarType` is `char=0, bool=1, int=2, bitField=3, float=4, double=5`. So the `char`, `bitField` and `float` decode paths are never exercised — yet real iRacing publishes most channels as `float` and `SessionFlags` as `bitField`. The entire flag block at `iracing_reader.py:295-318` is tested against a signed int that **cannot represent `irsdk_startGo = 0x80000000`**. Every existing bit test in the file (`0x10`, `0x20`, `0xC108`, `0x20000`) is below bit 28, so signedness has never been exercised. `unit` is always packed as `b""` at `:112`.
+
+Build a type-faithful fixture builder covering kinds 0/3/4, real unit strings, and arrays; add an explicit signed/unsigned `bitField` case at bit 31. Also add an iRacing-shaped `sample_snapshot` — `src/ssc_engineer/sample.py:29,43` is LMU-shaped with full `wheels` and is imported by ~60 test files, so the `unavailable_fields` gates are effectively untested in iRacing shape.
+
+**Also add a raw-frame recorder.** `recorder.py:20-40` serialises `snapshot.to_dict()` / `derived.to_dict()` — i.e. the *output* of the unit under test — so it cannot serve as a golden corpus. You need a recorder that dumps `frame.values` + `frame.session_info` verbatim.
+
+**Unlocks:** nothing user-visible. Ships as the thing that makes every later stage provable, and immediately re-measures the real gap (do this and re-run the 110-field count before costing the rest).
+
+---
+
+##### Stage 3 — Delete the simulator-name denylist and audit Gate 3 (2-3 days). Small, zero field work, highest visible payoff per hour.
+
+Delete `voice/tool_status.py:61-76` outright. Every tool on that list already has data-driven availability logic; the name check is a belt-and-braces guard that now blocks working data. Then audit the Gate 3 sites listed above one at a time: for each, decide whether the `!= "lmu"` is standing in for a *data* precondition (replace it with an `unavailable_fields` check) or a genuine LMU-only capability (keep it, and say so in a comment).
+
+`pit_operations.py:438` deserves particular attention — `if snapshot.simulator != "lmu" or "pitstops" in snapshot.unavailable_fields:` means Stage 7's `pitstops` work is invisible until the name check goes.
+
+**Unlocks (measured):** `get_race_control_status`, `get_track_segment_status`, `get_strategy_status`, `get_current_stint` become data-gated rather than name-gated. `get_race_control_status` starts working immediately on existing data.
+
+**Test:** parameterise the existing voice-tool availability tests over `simulator in {"lmu", "iracing"}` and assert that a tool's availability is a function of `unavailable_fields` only. That test is the thing that stops the denylist growing back.
+
+---
+
+##### Stage 4 — Sim-partition the persisted models (5-8 days). Not glamorous. Ship it before any new field starts feeding a model.
+
+This is a **live correctness bug today**, independent of parity, and every later stage makes it worse.
+
+- **Driver profiles pool across physics engines.** `persistence/profiles.py:429-437` hard-allowlists exactly five WHERE clauses (`lc.driver`, `lc.vehicle_class`, `lc.vehicle`, `lc.track`, `lc.condition_key`) and raises `ValueError` on anything else — `lc.api_version = ?` is *not permitted*, even though `lap_conditions` stores the column (`persistence/records.py:216,227`). Same shape at `profiles.py:235-236,302-303` for `driver_baseline`. So `estimated_lap_s` and `estimated_fuel_per_lap_l` are pooled across LMU and iRacing at `HIGH` confidence. Extend the allowlist.
+- **Prediction accuracy pools too.** `persistence/live_predictions.py:67-85` records driver/track/vehicle/session_uid but no simulator or api_version; `prediction_calibration.py:524-528` groups on `(category, model_version, value_kind, unit)`.
+- **The CLI writes iRacing data into the LMU database.** `ui/controller.py:129-155` (`simulator_paths`) redirects to `<root>/iracing/data/ssc_iracing.db`, but it is applied only by the desktop shell (`ui/application.py:221,236`). `runtime/service.py:110-111` rewrites `prepared.database` only in `debug` mode and returns early; `cli.py:84-87` defaults `--database` to `cwd/data/ssc_race_engineer.db` regardless of `--simulator`. `ssc-engineer --simulator iracing` contaminates the LMU DB unguarded.
+- **The import path fabricates conditions.** `persistence/calibration.py:27-72` (`_import_condition_key`) ignores `unavailable_fields`: absent rain → `DRY`, absent `time_of_day_s` → hour 0 → `NIGHT`, absent grip → `MEDIUM`. Live says `UNKNOWN`; import says `DRY_NIGHT_?_MEDIUM`. Today this only poisons `lap_conditions`. **The moment Stage 8 maps tyres, it writes `tyre_calibration_samples` under a 4-part key that passes the `"UNKNOWN"` guard at `calibration.py:314` — converting today's working safety valve into a hole.**
+
+Note what is already correct and should stay: tyre calibration *is* properly partitioned twice — `TyreCalibrationKey.api_version` (`calibration.py:27`, `:600`, SHA-256'd into `model_key` at `:33-36`), samples stored with `api_version` (`records.py:293`), training reads `WHERE t.api_version = ?` (`persistence/calibration.py:479`); and `communication/context.py:44-45,72-77` forces surface/light/grip to `UNKNOWN` for iRacing, so `calibration.py:314-315` refuses with `INSUFFICIENT_SCOPE`.
+
+**Test:** an integration test that runs an iRacing session and an LMU session against one DB root and asserts zero cross-reads from `driver_baseline`, `lap_conditions` and `prediction_accuracy`; plus a CLI test asserting `--simulator iracing` resolves to the iRacing DB path.
+
+---
+
+##### Stage 5 — Cheap confirmed scalars (3-5 days). Small, purely additive, low risk.
+
+All of these go in or immediately after the existing `numeric()` table at `iracing_reader.py:221-237`. Every variable below was confirmed verbatim in a fetched primary source.
+
+**Always-published (add rows to the table at `:222-236`):**
+| Field | Variable | Note |
+|---|---|---|
+| `rain_pct` | `Precipitation` | scale `100.0`. iRacing's `%` unit is a 0–1 fraction — same as `Throttle`/`Brake`/`FuelLevelPct` which this file already scales by 100. **Verify against a live wet session before shipping**; a 0–100 source reports 10x. |
+| `cloud` | `Skies` | int 0–3 → `Clear`/`PartiallyCloudy`/`MostlyCloudy`/`Overcast`, deliberately never emitting the four LMU `Cloudy*Rain` names. Strict subset of the existing string vocabulary, so no downstream comparison breaks. |
+| `abs_active` | `BrakeABSactive` | clean match for LMU `mABSActive`, core telemetry, no probing. |
+| `local_velocity_mps` | `VelocityX/Y/Z` | **axis trap**: iRacing is car-local X-forward/Y-lateral/Z-vertical; LMU inherits rF2's X-lateral/Y-vertical/Z-negative-longitudinal. Remap by role, not position. |
+| `local_acceleration_mps2` | `LongAccel`/`LatAccel`/`VertAccel` | same remap. All three **include gravity** (~9.8 vertical at rest) — confirm LMU's convention before treating them as interchangeable. |
+| `local_rotation_rad_s` | `YawRate`/`PitchRate`/`RollRate` | rad/s, no scaling. Map by name into the LMU tuple slots; expect a sign flip on at least one axis. |
+| `battery_soc_pct` | `EnergyERSBatteryPct` | scale `100.0` (assume 0–1 per house idiom, **confirm on a hybrid car** — a 0–100 source gives 10000%). Absent for non-hybrid cars, which `numeric()` already handles by simply never calling `put()`. This **contradicts `docs/user/IRACING_SUPPORT.md:37-40`**, which is correct about virtual energy and wrong about battery SoC. |
+
+**Car-dependent `dc*` channels — add a separate probed block after `:285`.** These are appended per-car to the variable-descriptor table, which `iracing_sdk.py:187-201` enumerates at runtime, so `telemetry.get()` returning `None` already does the right thing. Never assume presence.
+- `brake_bias_front_pct` ← `dcBrakeBias`. **Unit string is empty in the SDK.** Most cars report percent-front (e.g. `54.0`), some a click index. Do not blind-scale: validate the range and leave unavailable outside 0–100.
+- `front_arb` ← `dcAntiRollFront`, `rear_arb` ← `dcAntiRollRear`. Click indices, cast to int, no physical interpretation.
+- `tc` ← `dcTractionControl`. The knob position, matching LMU `mTC`.
+- `abs_setting` ← `dcABS`. Click index. Distinct from `abs_active`.
+
+**Do not map:** `tc_cut` / `tc_slip` (`dcTractionControlCut` **does not exist**; which of `dcTractionControl`/`dcTractionControl2` is cut vs slip is car-specific and unstated — leave unavailable pending a verified per-car table), `motor_map` (no confirmable channel; **do not use `PlayerCarPowerAdjust`**, which is BoP adjustment applied by the sim, not a driver-selected map), `headlights` (`dcHeadlightFlash` is the momentary flash-to-pass button — wiring it here inverts the meaning in exactly the night-endurance case the app exists for), `physical_steering_wheel_range_deg` (`degrees(SteeringWheelAngleMax)*2` is in-sim lock-to-lock, a different physical quantity from the user's wheelbase range).
+
+**Unlocks:** per the counterfactual measurement, **`rain_pct` is the only one of these that moves `source_capabilities.py`** — and only in combination (see Stage 6). The rest are pure UI/voice richness and feed the corner-balance and operating-mode tools. Be honest about that: this stage is cheap and visible, not structurally load-bearing.
+
+**Test:** one fixture per field asserting value *and* unit; an axis test asserting that under straight-line acceleration the longitudinal component of `local_velocity_mps` tracks `speed_kmh/3.6`; a `dc*` test asserting the field lands in `unavailable_fields` when the variable is absent.
+
+---
+
+##### Stage 6 — Weather, flags and race control (4-6 days). Medium. This is where the field work starts paying structurally.
+
+**`wetness_avg_pct` ← `TrackWetness`** (enum `irsdk_TrackWetness`, 8 levels: `UNKNOWN=0, Dry, MostlyDry, VeryLightlyWet, LightlyWet, ModeratelyWet, VeryWet, ExtremelyWet`). LMU's side is a continuous measured fraction (`reader.py:433`); iRacing gives an **ordinal**. Filling a `_pct` field from it means inventing bucket centres, and those numbers are a presentation choice, not evidence. **Recommended:** map it so the weather module comes alive, treat `0 (UNKNOWN)` as absent rather than 0%, and *exclude `wetness_avg_pct` from any slope/rate derivation* — the weather module's `wetness_trend` will otherwise compute drying-rate slopes off a staircase, which is quantization noise until a bucket flips. Document the bucket table as a mapping, not a measurement. (Caveat on sourcing: `irsdk_TrackWetness` is **absent from the vipoo header this repo cites** at `iracing_sdk.py:3-4`; it is confirmed in SIMRacingApps' header and in pyirsdk. Update the cited reference.)
+
+**Do not map `wetness_min_pct` / `wetness_max_pct`.** iRacing publishes exactly one scalar wetness value and documents `TrackWetness` as the average surface only. Do not synthesise `max = avg + k` — that fabricates precisely the standing-water signal the strategy layer uses to decide wet-tyre crossover.
+
+**Add `WeatherDeclaredWet`** ("the steward says rain tires can be used") as a new field on both sims if there is an LMU analogue, or as an iRacing-only advisory. It is the single most decision-relevant wet channel and neither the classification nor the contract currently has a home for it.
+
+**`penalties` ← `SessionFlags` black-flag bits.** `irsdk_black = 0x00010000`, `irsdk_disqualify = 0x00020000`, `irsdk_furled = 0x00080000`, `irsdk_repair = 0x00100000`. Edit site: inside the existing `if flags is not None:` block at `iracing_reader.py:295` — the plumbing is already there (`:317` already tests `0x20000`). This is a **popcount of raised bits (0–4)**, not a true penalty count like LMU's `mNumPenalties`. **Do not** use `PlayerCarMyIncidentCount` / `DriverIncidentCount` / `TeamIncidentCount` — incident points are a different rule that scores contact, spins and off-tracks, most of which never become a penalty. `PlayerIncidents` uses `irsdk_IncidentFlags`, whose members I could not confirm in any fetched header — leave it. Note pyirsdk carries `dq_scoring_invalid = 0x200000`, present in neither C header; the sources disagree and the mapping should tolerate it.
+
+**`yellow_flag_state` ← `SessionFlags` caution bits + `PitsOpen`.** `irsdk_caution = 0x4000`, `irsdk_cautionWaving = 0x8000`, `irsdk_oneLapToGreen = 0x200`, `irsdk_greenHeld = 0x400`. Recoverable subset of the LMU enum: `None` (no caution bit), `PitsClosed` (caution ∧ ¬`PitsOpen`), `PitsOpen` (caution ∧ `PitsOpen`), `LastLap` (`oneLapToGreen`), `Resume` (`greenHeld`), `RaceHalt` (`irsdk_red 0x10`, already used at `:217`). Not recoverable: `Pending` (no pre-caution bit) and `PitLeadLap` (iRacing's lucky-dog is per-car on `CarIdxPaceFlags`, not a full-course phase). Emit `Invalid` when `SessionFlags` is absent. **This field defaults to `"Invalid"` in the dataclass, so it is currently silently wrong-by-default on iRacing rather than absent — populating it is a correctness fix, not a feature.**
+
+**Signedness landmine:** `irsdk_startGo = 0x80000000` sets bit 31. If the SDK layer hands Python a signed int32, that arrives as `-2147483648` and `int(flags) & 0x80000000` misbehaves. `_number()` at `:112-116` coerces to float, which holds it *if* the underlying read is unsigned. Stage 2's bitField fixture must cover this before any bit-31 test ships.
+
+**Leave unavailable, deliberately:** `track_limits_steps` / `_per_penalty` / `_per_point` (LMU's step→point→penalty rule engine does not exist in iRacing; incident points are a different axis, and `WeekendInfo:WeekendOptions:IncidentLimit` is a session-wide DQ cap, not a step ratio — mapping it would misrepresent it). `lap_invalid` (iRacing does not publish its verdict; latching `PlayerTrackSurface == irsdk_OffTrack` reproduces *your* off-track rule, not iRacing's — if you want the signal, add a new `off_track_this_lap` field rather than overloading `lap_invalid`). `sector_yellow` (**hard contract mismatch**: `RaceSnapshot` types it `tuple[bool, bool, bool]`, but `SplitTimeInfo:Sectors` length is track-dependent and real ovals have two — padding to three is a lie). `num_red_lights` and `start_light` (iRacing models the start as a 4-state machine, not N lights; `start_light/num_red_lights` would divide by zero — expose a separate `start_state` string `Hidden/Ready/Set/Go` on both sims instead). `track_grip` (`SessionTrackRubberState` is a per-session *starting* string in the YAML, it does not evolve as rubber goes down — mapping it makes a static value look like a live channel, and it is the field that currently keeps `calibration.py:314` refusing to train iRacing tyre models, which is the correct behaviour).
+
+**`championship`:** either put an opaque `iracing:series:<SeriesID>:season:<SeasonID>` key, matching the existing `source_session_id`/`source_track_key` idiom at `:199-263`, or leave unavailable. Resolving the real series name needs the authenticated iRacing `/data` web API — network calls and credentials, squarely outside this app's local scope. Check the pitwall/voice consumers first: if anything renders `championship` as a display name, option (a) shows an id string to the driver.
+
+**Unlocks (measured):** `penalties` → `race_control.penalties` and PENALTY-coded events. `rain_pct` + `wetness_avg_pct` together → `WeatherState`, `get_weather_status`, the entire `WEATHER` event category. `yellow_flag_state` fixes a wrong default.
+
+**Test:** a fixture per flag bit including bit 31; a test asserting `wetness_avg_pct` is in `unavailable_fields` when `TrackWetness == 0`; a `source_capabilities` test asserting `WEATHER` events survive with both weather fields present and are stripped with either missing.
+
+---
+
+##### Stage 7 — Gaps and relative timing (5-7 days). Medium. High perceived value, low strip-leverage — be clear about which you are buying.
+
+All four gap fields plus the two leader fields are **one helper over the `CarIdx*` arrays**, not six pieces of work. Edit site: `_opponents()` at `iracing_reader.py:332-343`, which already reads `CarIdxPosition`, `CarIdxLapCompleted`, `CarIdxLapDistPct`, `CarIdxTrackSurface`, `CarIdxOnPitRoad`.
+
+- **`laps_behind_leader`** — `CarIdxLapCompleted[leader] - LapCompleted`, leader = index where `CarIdxPosition == 1`. Exact, a couple of lines, both arrays already read. Clamp at 0 to match LMU's `max(0, ...)`. Guard on race session.
+- **`time_behind_leader_s`** ← `CarIdxF2Time[PlayerCarIdx]`. A genuine direct match **only in a race session** — the SDK description is explicit that outside a race the same array carries fastest lap time instead. **Gate on `session_row["SessionType"] == "Race"`** (already parsed at `:209-211`) and mark unavailable otherwise. Mapping it unconditionally silently publishes a lap time as a deficit to the leader.
+- **`gap_car_ahead_s` / `gap_car_behind_s` / `gap_place_ahead_s` / `gap_place_behind_s`** — **iRacing publishes no measured time gap.** Use `CarIdxEstTime` differences, resolving the target car yourself from `CarIdxPosition` / `CarIdxLapCompleted` / `CarIdxLapDistPct`. `CarIdxEstTime` is a per-car lap-elapsed estimate built from a reference lap: smooth, but systematically wrong for a car off-pace, off-line or in the pits, and it wraps discontinuously at S/F — raw subtraction across the wrap gives a full-lap error. Suppress hard whenever `CarIdxOnPitRoad` or `CarIdxTrackSurface` says either car is not on track. The alternative, `CarDistAhead`/`CarDistBehind` ÷ `Speed`, is exact in metres but divides by instantaneous speed (blows up at low speed, meaningless when stationary) *and* finds the nearest car by track position regardless of lap or class — on a multi-class grid that is not the car the strategist cares about.
+- **Mirror LMU's sentinel discipline.** When the place-ahead/behind car is a lap away, LMU emits a sentinel that `valid_gap()` rejects. Return `None`, not an extrapolated number.
+
+These are **estimates**. Nothing downstream that treats LMU's measured `mTimeGapCarAhead` as ground truth should consume them without knowing that. If there is no provenance mechanism on these fields, add one.
+
+**Unlocks:** `get_position_and_gaps` stops reporting `gaps_available=False`. Zero change in `source_capabilities.py` — measured.
+
+**Test:** a multi-car fixture with a known wrap across S/F asserting no full-lap error; a fixture with the target car on pit road asserting the gap is suppressed; a non-race-session fixture asserting `time_behind_leader_s` is unavailable.
+
+---
+
+##### Stage 8 — `pitstops`, and the reader's statelessness decision (5-8 days). Medium-hard. This is where the architecture bends.
+
+iRacing publishes **no completed-stop counter**. Confirmed by exhaustive grep: only `PitstopActive`, `OnPitRoad`, `PlayerCarInPitStall`, `PlayerCarPitSvStatus`, `FastRepairAvailable/Used`, and the `dp*` service-request channels. LMU reads `scoring.mNumPitstops` directly.
+
+So `pitstops` must be derived by **edge-counting** false→true transitions of `PlayerCarInPitStall` (better than `OnPitRoad`, which also ticks for a drive-through or a pit-lane pass) or of `PitstopActive` (counts only serviced stops). Pick one and document which.
+
+**This breaks the reader's design invariant.** `normalize_iracing_snapshot()` at `iracing_reader.py:145` is deliberately stateless per frame — it takes one `Mapping` and returns a `RaceSnapshot`. Cross-frame state belongs on `IRacingSharedMemoryReader` alongside `_last_tick` (`:395`) and `_session_text` (`:397`), threaded in as a parameter, and **reset in `close()`** (`:441`) like the others so a reconnect does not report a stale count. Make that decision once, explicitly, in this stage — Stage 9 and the impact fields need the same mechanism.
+
+**Be honest about what this is.** App-held state is wrong after a mid-session app restart, wrong after a mid-session join, and wrong for a team-race driver swap where the stop happened before you attached. It is a different *kind* of evidence from LMU's sim-authoritative counter. `source_capabilities.py:94` calls the requirement "validated stop counts" — an edge count is not that, and the `PitCycleState` / `PitExecutionState` consumers should be told so via a provenance field rather than silently upgraded.
+
+**Unlocks (measured, score +4):** `pit_cycle`, `pit_execution`, `service_error`, `caution_strategy`, and the `PIT SERVICE` event category — *but only after Stage 3 removes the `simulator != "lmu"` half of `pit_operations.py:438`.*
+
+**Test:** a frame-sequence test driving `PlayerCarInPitStall` through false→true→false→true and asserting the count; a test asserting `close()` clears it; a test asserting a drive-through (`OnPitRoad` true, `PlayerCarInPitStall` never true) does not increment.
+
+---
+
+##### Stage 9 — Tyres, done honestly (8-12 days). The hardest stage, and the one you must not do the obvious way.
+
+**Do not `put("wheels", ...)`.** `WheelState` (`contracts/telemetry.py:11-43`) has 19 required fields with no default plus 6 optional. iRacing can source about 7 of them: three tread-remaining percentages (`LFwearL/M/R` et al.), three **carcass** temperatures (`LFtempCL/CM/CR`), a garage-set cold pressure, an odometer, and a compound (`PlayerTireCompound`).
+
+**Genuinely absent, not unmapped:** live hot `pressure_kpa` (there is *no* live tyre pressure channel in iRacing — `LFcoldPressure` is "as set in the garage", `PitSv*P` is the pending service target, `dp*TireColdPress` is an adjustment request; none is a measurement), `brake_temp_c`, `load_n`, `grip_sliding_pct`, per-wheel `surface`, `flat`, `detached`, `rotation_rad_s`, all four patch/ground velocities, `inner_layer_avg_c`, `optimal_c`, and `surface_left/center/right_c`. iRacing gives carcass, not surface — **do not alias them.**
+
+The cascade if you alias anyway: `engineering/tyres.py:41` gates on `surface_avg_c > 0 and optimal_c > 0` → `thermal_valid` permanently False; `engineering/lap.py:117` records zero temp samples; `calibration.py:616` gates calibrated degradation on `tyre.thermal_data_valid` → permanently `None`. You would have paid for a contract change and got nothing.
+
+And the wear/pressure channels are **pit-refreshed, not live**. Populating `wheels` makes `source_capabilities.py:65-66` and `:113` treat stall-frozen numbers as live evidence — exactly the failure mode the reader docstring at `iracing_reader.py:3-4` forbids. (Cadence caveat for the record: neither `vars.txt` nor `irsdk_defines.h` states update cadence for any channel. The pit-refresh claim is this codebase's standing assumption, not a sourced fact, and `docs/user/IRACING_SUPPORT.md` asserts it without a citation. It should be labelled as policy.)
+
+**What to build instead, in three parts:**
+
+1. **A separate, honestly-named pit-refreshed tyre-report channel** with its own refresh timestamp stamped from `PlayerCarInPitStall` / `OnPitRoad`. Carries tread-remaining, carcass temps, compound, odometer, and the last-known cold pressure. Unit note: LMU's `mWear` is 0–1 inverted into `condition_pct`; iRacing's `wearL/M/R` is *already* percent tread **remaining**, so it maps to `condition_pct` directly, **not** through `tyre_wear_used_pct()`.
+2. **`wheels` stays unavailable.** Permanently, unless iRacing publishes live pressure and surface temperature.
+3. **Fix the gate, not the field.** `source_capabilities.py:113-121` discards the *entire* `StrategyScenarioState` if any of `{wheels, wetness_avg_pct, pitstops, fuel_l}` is missing — measured: 14 scenarios in, **0** out, all-or-nothing. That gate is the real bug. Split it per-scenario so the tyre-dependent scenarios (`KEEP_TYRES`, `CHANGE_COMPOUND`, `FUEL_AND_TYRES`) gate on `wheels` and the fuel/weather scenarios (`STAY_OUT`, `PIT_NOW`, `PIT_NEXT_LAP`, `SAVE_FUEL`, `REACT_TO_RAIN`, `WAIT_FOR_CROSSOVER`) do not. **This is roughly a day of work and it is worth more than the entire tyre mapping.**
+
+**Ceiling, stated plainly:** even on LMU, `strategy_evaluation.py:232-258` hardcodes 7 of the 14 scenarios `UNAVAILABLE` for calibration reasons (`FUEL_ONLY`, `FUEL_AND_TYRES`, `KEEP_TYRES`, `CHANGE_COMPOUND`, `DRIVER_CHANGE`, `NO_DRIVER_CHANGE`, `PUSH_TO_EXTEND_GAP`). The real iRacing ceiling is the same **7 reachable scenarios** LMU has, and three of those additionally need `strategy_pit_loss_calibrated` (`strategy_evaluation.py:115,164-170`).
+
+**Also unmentioned but real:** `LFTiresAvailable` / `LFTiresUsed`, `TireSetsAvailable` / `TireSetsUsed`, `PitSvTireCompound` — a genuine tyre-*set* model iRacing supports and LMU does not. Worth a separate small feature.
+
+**Test:** assert `wheels` stays in `unavailable_fields`; assert the tyre-report channel's refresh timestamp does not advance while on track; a `source_capabilities` test asserting the split gate yields the fuel/weather scenarios with `wheels` missing and `pitstops`+`wetness_avg_pct`+`fuel_l` present.
+
+---
+
+##### Stage 10 — Sectors (5-8 days). Medium. Lowest leverage of the remaining work; do it last or not at all.
+
+`sector`, `current_s1_s`, `current_s2_elapsed_s`. **iRacing publishes sector boundaries but never sector times** — confirmed by exhaustive grep over 327 vars and a 461-entry generated enum for `sector|split|s1|s2`: zero hits. You must time them: stamp `SessionTime` when `LapDistPct` crosses each `SectorStartPct` from `SessionInfo:SplitTimeInfo:Sectors`. Accuracy is bounded by the 60 Hz tick (~8 ms) unless you interpolate the crossing.
+
+Two blockers:
+- **The scalar parser needs extending.** `parse_iracing_session_info()` at `iracing_reader.py:59-109` handles only `WeekendInfo` (depth 1), `DriverInfo` and `SessionInfo:Sessions`; `_scalar()` at `:47-57` hard-rejects `[`/`{`/`!`/`&`/`*` by design. `SplitTimeInfo` is a top-level section it does not touch. The idiom exists elsewhere (`lico/adapters.py:279-280` already reads `SplitTimeInfo`), but the hard-edged parser is a deliberate security posture and any extension must preserve it. Add ~3 days if nested-array support is needed.
+- **iRacing tracks do not have three sectors.** A real oval dump has exactly two. `current_s1_s`/`current_s2_elapsed_s` are LMU-shaped; on a 2-sector track you cannot fill them honestly. Emit `sector` as `"S1"`/`"S2"` and tell any downstream code that assumes three.
+
+Do `current_s1_s`, `current_s2_elapsed_s` and `sector` as **one stateful sector-timer** (state on `IRacingSharedMemoryReader`, per Stage 8's decision), not three pieces of work.
+
+**Unlocks:** nothing in `source_capabilities.py` — measured. UI richness and `get_track_segment_status` detail only.
+
+---
+
+##### What can never reach parity, and what the product should claim instead
+
+These are capability gaps, not backlog items. State them in `docs/user/IRACING_SUPPORT.md` as a permanent list, not a "not yet" list.
+
+**iRacing does not model it at all:**
+- **Live tyre pressure and surface temperature.** No live pressure channel exists; iRacing publishes carcass temperature, not surface. Consequence: `car_health.pressure_status == "PRESSURE LOSS OBSERVED"` (`decision.py:378-392`) cannot be honestly driven, and calibrated tyre degradation (`calibration.py:616`, gated on `thermal_data_valid`) is permanently `None`.
+- **Per-panel damage** (`dent_severity`), **impact geometry** (`impact_position_m` — iRacing publishes no contact geometry whatsoever), **`body_part_detached`**, **`last_impact_magnitude`** (an accelerometer spike in m/s² is a different physical quantity on a different scale from LMU's sim-internal impact scalar; any threshold tuned against LMU values is meaningless against iRacing's).
+- **Electric motor internals**: `electric_motor_temp_c`, `electric_motor_coolant_temp_c` (iRacing publishes only the ICE circuit, already consumed as `engine_water_temp_c` — **do not substitute `WaterTemp`**), `engine_torque_nm` (**high risk of a false mapping**: `SteeringWheelTorque` is in N·m and contains "Torque", and it is force feedback on the steering shaft; `ShiftPowerPct` is gearbox friction).
+- **`lift_and_coast_pct`** — LMU's is a car-system readout scaled 0–255. You *could* compute a lift-and-coast coaching metric from `Throttle`/`Brake`/`Speed`/`LapDistPct`, but that is a different quantity with a different scale, and putting it in this field makes one field name mean two incomparable things across sims — which defeats the shared contract. If you want it, give it its own name and populate it on **both** sims from the same derivation.
+- **`physical_steering_wheel_range_deg`** — iRacing keeps wheelbase rotation in its controls config and never publishes it.
+
+**Regulation concepts iRacing does not have:**
+- **`virtual_energy_pct`** — LMU's `mVirtualEnergy` is the WEC/ACO per-stint energy allowance. `EnergyMGU_KLapDeployPct` resets every lap and measures deploy budget, not a stint consumable; mapping it feeds a per-lap sawtooth into the fuel/VE stint model and produces nonsense refuel targets. `source_capabilities.py:52-64` already sets `applicable=False` and flips `limiting_resource` to `"FUEL"`. **That is correct and should stay.**
+- **`track_limits_steps*`** — a rule engine iRacing does not run.
+- **`migration`** — LMU's hybrid brake/torque migration. iRacing's brake bias is a different quantity; do not map it here.
+
+**Contract-shape mismatches:** `sector_yellow` (`tuple[bool,bool,bool]` vs. variable sector count), `start_light`/`num_red_lights` (frame index vs. 4-state machine).
+
+**What the product should say:** not "iRacing support is limited," but a capability matrix — *fuel, pace, position, gaps, flags, race control, weather and pit cycle at parity; tyre advice limited to pit-refreshed condition reports with an explicit refresh timestamp; no damage, impact or hybrid-system engineering; virtual-energy strategy is LMU-only because iRacing does not race to that regulation.* Frame the non-parity items as "iRacing does not model this," which is true, rather than "not yet validated," which invites a bug report.
+
+**Derivable-but-different, worth adding under new names on both sims:** `damage_repair_required` (from `SessionFlags` `irsdk_repair 0x00100000` — two lines, `flags` is already read at `:213`; note `PitRepairLeft` is documented "only available when `PlayerCarInPitStall` is True", so even the repair-time proxy is stall-only), `off_track_this_lap`, `start_state`, `impact_detected` + `last_impact_age_s`. On the last: `last_impact_age_s` is the **one damage field that transfers cleanly** — `max(0, SessionTime - stored_impact_SessionTime)` mirrors LMU's `max(0, mElapsedTime - mLastImpactET)` (`reader.py:331-335`) in identical units and semantics. It is strictly gated on solving impact *detection* first (`PlayerCarMyIncidentCount` delta is the sim's own contact adjudication and more reliable than an accel spike, but it also fires on off-tracks; the accel channels include gravity so a naive magnitude detector misfires on every kerb). Like LMU, it must stay unavailable until the first detected impact — not report `0.0`.
+
+---
+
+##### The write path: a separate product decision, not a stage
+
+**It is orthogonal to everything above.** None of the 62 fields, none of the 14 scenarios, and none of the 13 denylisted voice tools are blocked by the lack of write access. Do not sequence it against parity work — it depends on nothing in stages 1-10 except the read-back mapping in Stage 8's neighbourhood.
+
+**The API is real and first-party.** `irsdk_defines.h:358-374` defines `enum irsdk_BroadcastMsg` including `irsdk_BroadcastPitCommand`; `:384-398` defines `irsdk_PitCommandMode` (`Clear`, `WS`, `Fuel` in litres, `LF`/`RF`/`LR`/`RR` in kPa, `ClearTires`, `FR`, `ClearWS`, `ClearFR`, `ClearFuel`) with the header comment "this only works when the driver is in the car"; `:462-466` declares the `irsdk_broadcastMsg` overloads. Transport is `RegisterWindowMessage("IRSDK_BROADCASTMSG")` then `SendNotifyMessage(HWND_BROADCAST, msgId, MAKELONG(msg, var1), var2)` — about 40 lines of ctypes. Every command has a first-party in-sim equivalent in iRacing's documented pit macros (`#fuel`, `#lf`, `#fr`, …), so this is a programmatic door onto a feature the driver already has bound to a key. Shipping community engineer apps use it.
+
+**Four properties you must design around:**
+1. **Fire-and-forget, no ack, no addressing.** `SendNotifyMessage` returns "posted", never "applied", and it broadcasts to every top-level window. The *only* verification is reading back `PitSvFlags`, `PitSvFuel` (unit is "l **or kWh**" — varies by car, do not assume litres), `PitSv*P`, `PlayerCarPitSvStatus` (whose `irsdk_PitSvStatus` enum is **absent from the header this repo cites** — you would be decoding integers you have not sourced). **The write-then-verify loop is the feature; budget for that, not for the send.** None of those channels is mapped today (`iracing_reader.py:286-293`, `:339` read only `OnPitRoad`/`PitstopActive`/`CarIdxOnPitRoad`), and `RaceSnapshot` has no home for them (`contracts/telemetry.py:65-68`) — so this is new contract surface on both sims.
+2. **Quantization is user-visible.** The parameter lands in the low 16 bits of lParam: whole litres, whole kPa. You cannot request 34.7 L. The app must decide *and say* whether it rounds up or down, every time.
+3. **It would not produce parity — it would produce asymmetry.** LMU shared memory has no write plane (`lmu_data.py:451` maps `SharedMemoryObjectOut`; no rF2-style `HWControl` region exists). LMU *does* have an undocumented local HTTP pit-menu endpoint (`POST http://localhost:6397/rest/garage/PitMenu/loadPitMenu`), used by third-party tools, but its body shape is undocumented and the port is unversioned. So "same functionality" is reachable only as a user-facing abstraction — one `propose_pit_service` capability with two adapters whose failure modes are not alike. iRacing would be ahead on confidence (official header, fixed enums) and behind on scope (no driver swap, no fractional fuel); LMU the reverse. This repo has never touched port 6397 — grep for `6397|rest/garage` across `src/` and `docs/` returns nothing. It is greenfield on both sides.
+4. **`irsdk_PitCommand_FR` consumes a limited resource** (`FastRepairAvailable`/`FastRepairUsed`) and is not reversible by `ClearFR` once the stop is taken. Treat it as the highest-consequence command in the set, behind its own gate.
+
+**It breaks a stated, tested product contract — deliberately, and that must be explicit.** `SECURITY.md:41` ("no voice or team-sync path can control the simulator, car setup or pit menu", filed under things a violation report of which *is a security issue*); `voice/config.py:131-133` (the model's own system prompt: "You cannot control LMU, the car, pit menu, iRacing, or setup"); `docs/user/IRACING_SUPPORT.md:7`; `iracing_sdk.py:1-6`; `runtime/service.py:396`.
+
+The existing tests draw the line at the **remote/team** layer, not the local one — `tests/team/test_team_operations_v013.py:81` asserts `remote_pit_menu_control_allowed: False`, `:124` asserts `team_action("operate_pit_menu")` raises `TeamGatewayError("Unsupported")`, `tests/engineering/test_pit_operations_v102.py:185` asserts `automatic_pit_menu_control` is False. **Those three should stay true and stay tested.** Rewrite `SECURITY.md:41` precisely rather than deleting it: *"no remote or team-sync path can operate the pit menu; local pit-service requests are driver-confirmed and never automatic."*
+
+**One guardrail is not good enough for this.** `voice/guardrails.py:134-162` flattens `recommended_action`, `exact_text` and `status` into one casefolded blob and `_action_is_permitted` (`:165`) does substring tests — `if action in {"box","pit"}: return "box" in evidence or "pit" in evidence`. Any tool result containing "pit road" or "pit window" authorises the model to say "box". That hole has never been load-bearing because the app could not act. **Do not route a pit command through the transcript guardrail.** Build a separate, structured, allow-listed action channel with its own evidence requirements.
+
+**Recommendation if you do it:** ship **driver-confirmed pit-box requests only** — pit service, nothing else. Explicitly out of scope: `irsdk_FFBCommand_MaxForce` (it sits in the same enum family, it is technically sanctioned, and an app that speaks with an engineer's voice should not quietly rescale the driver's wheel), camera, chat, and categorically any synthetic input (SendInput/vJoy) — there is no API for car control, so the only way to build it is input injection, which is the thing sporting codes exist to catch. The line is not "does the app write?" but "does the write go through a documented sim API that a human could have triggered from the sim's own UI, while the car stays under human control?"
+
+Structure: new `src/ssc_engineer/iracing_broadcast.py` (pure ctypes, sibling to `iracing_sdk.py`, which stays `FILE_MAP_READ` and untouched); a sim-agnostic `PitServiceCommand` contract with an iRacing adapter and an LMU `loadPitMenu` adapter behind a default-off flag; a voice tool shaped exactly like `set_lico_fuel_target` (`voice/tool_lico.py:205-215`, `voice/agent_tools.py:296-308`) — the app's only existing mutating tool — whose prompt rule already says *"Say a change succeeded only when the tool returns available and accepted=true"* (`voice/config.py:123`). **The tool proposes; a separate step the model cannot reach sends.** Confirmation binds to the existing PTT (`voice/ptt.py`) or a UI button showing exact values including the rounding, per stop, never per session. Preconditions enforced in code: in the car, `PitsOpen`, live-not-replay, session identity match. **Write the tests that pin the new line before you write the sender.** Effort: 6-10 days, plus the read-back contract work.
+
+**Do not omit `PitCommandMode.tc = 12` (tyre compound) without noting it:** pyirsdk carries it and `vars.txt` publishes `PitSvTireCompound`, but it is **absent from the vipoo header** and I could not confirm it against an iRacing-authored source. Feature-flag it or omit it.
+
+---
+
+##### Effort and sequencing
+
+| Stage | Days | Ships on its own? |
+|---|---|---|
+| 1 — Fix the three live defects | 2-3 | Yes — correct steering, no phantom lap times, overheat warnings work |
+| 2 — Type-faithful fixture + raw recorder | 2-3 | No — prerequisite; re-measures the real gap |
+| 3 — Delete Gate 2, audit Gate 3 | 2-3 | Yes — 4 voice tools become data-gated |
+| 4 — Sim-partition persisted models | 5-8 | Yes — fixes a live data-contamination bug |
+| 5 — Cheap confirmed scalars | 3-5 | Yes — UI/voice richness |
+| 6 — Weather, flags, race control | 4-6 | Yes — WeatherState + PenaltyState + correct yellow state |
+| 7 — Gaps and relative timing | 5-7 | Yes — `gaps_available=True` |
+| 8 — `pitstops` + reader statefulness | 5-8 | Yes — pit cycle, execution, service error, caution strategy |
+| 9 — Honest tyre channel + split the scenario gate | 8-12 | Yes — the gate split alone (~1d) is the highest-value line in it |
+| 10 — Sectors | 5-8 | Marginal — do last or not at all |
+| **Read parity total** | **41-63** | |
+| Write path (separate decision) | 6-10 + read-back | Independent of all of the above |
+
+Stages 1-4 are cheap, mostly not parity work, and fix defects that exist today. Stage 9 is most likely to overrun — frozen contract, ~60 dependent test files via `sample.py` — and its cheapest component (splitting the all-or-nothing scenario gate at `source_capabilities.py:113-121`) is worth more than its expensive one.
+
+**Cannot be validated without live hardware, at any stage:** every refresh-cadence claim; the per-car `dc*` availability matrix; `SplitTimeInfo` shape per track; `irsdk_TrackWetness` integer values; `EngineWarnings & 0x40`; `Precipitation` and `EnergyERSBatteryPct` 0–1 vs 0–100; `SessionFlags` signedness at bit 31; multi-buffer tear rate under real 60 Hz load; reconnect across session transition, driver swap and tow; and whether any broadcast command actually takes effect. Budget a live-validation pass at the end of each stage, not one at the end of the project.
+
+**Key files:** `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/source_capabilities.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/voice/tool_status.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/strategy_evaluation.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/pit_operations.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/contracts/telemetry.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/persistence/profiles.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/persistence/calibration.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/cli.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/voice/guardrails.py`, `/home/user/ssc-race-engineer/tests/engineering/test_iracing_reader.py`, `/home/user/ssc-race-engineer/SECURITY.md`, `/home/user/ssc-race-engineer/docs/user/IRACING_SUPPORT.md`.
+
+
+---
+
+### B.2 Downstream impact analysis
+
+#### Downstream cost of the 62 unavailable iRacing fields
+
+I verified the architecture claim, ran the repo's own fixture through the real `SessionTracker`, and measured every strip counterfactually. **The central premise of the task is wrong in a way that changes the whole plan.** Details below, all empirically produced, not reasoned.
+
+##### 0. Correcting the premise: this is NOT "filling fields in one 456-line file"
+
+The task asserts feature parity is "almost entirely a QUESTION OF FILLING FIELDS IN ONE 456-LINE FILE" and asks me to correct it if wrong. **It is wrong.** There are *three independent gates*, and `unavailable_fields` is only one of them. Filling all 62 fields leaves gates 2 and 3 fully intact.
+
+**Gate 1 — `unavailable_fields` (data-driven).** `iracing_reader.py:328` → `source_capabilities.py:37-142`. This is the one the task describes.
+
+**Gate 2 — a hardcoded simulator denylist in the voice layer.** `voice/tool_status.py:61-76`:
+```python
+if context.simulator == "iracing" and name in {
+    "get_track_segment_status", "get_strategy_status", "get_endurance_status",
+    "get_race_control_status", "get_driver_profile", "get_best_matching_baseline",
+    "get_current_stint", "get_recent_stints", "get_comparable_stints",
+    "get_recent_race_sessions", "get_caution_strategy",
+    "get_pit_execution_status", "get_service_error_status",
+}:
+    return "This advanced engineering tool is not yet validated for iRacing"
+```
+13 voice tools keyed on the **simulator name**, not on data. No amount of field mapping unlocks them.
+
+**Gate 3 — `simulator != "lmu"` hard gates scattered through the engineering pipeline**, which the task claims is "SIMULATOR-AGNOSTIC". It is not:
+- `pit_operations.py:438` — `if snapshot.simulator != "lmu" or "pitstops" in snapshot.unavailable_fields:` — note the **`or`**: mapping `pitstops` alone still returns UNAVAILABLE for caution strategy, pit execution, and service error.
+- `strategy_projection_live.py:229` — `if snapshot.simulator != "lmu" ...` kills the digital twin / full-race projection.
+- `strategy_gap.py:75` — `snapshot.simulator != "lmu"` kills `EffectiveGapForecast`.
+- `qualifying.py:44` — `context.simulator != "lmu"` → "Qualifying preparation requires live LMU evidence."
+- `voice/tool_status.py:638` — `context.simulator != "lmu"` → `get_digital_twin`.
+- `persistence/driver_capabilities.py:185`, `persistence/live_predictions.py:144`, `persistence/traffic_prediction_endpoints.py:116,233`, `lico/integrated.py:221`, `voice/runtime.py:84`.
+
+So the correct statement is: **field mapping is necessary but nowhere near sufficient.** Roughly half the parity work is deleting simulator-name checks in ~10 files outside the reader.
+
+##### 1. The 14 strategy scenarios: all 14 are dead, and it is all-or-nothing
+
+The task asks which of the 14 are reachable. Empirically, with the repo's own fixture through the real tracker:
+
+```
+=== STRATEGY SCENARIOS (iRacing) ===
+state.status: UNAVAILABLE
+n scenarios: 0
+recommendation: UNAVAILABLE | Required provider channels are unavailable.
+```
+
+**Zero.** Not degraded — the tuple is *empty*. `source_capabilities.py:113-121` replaces the entire `StrategyScenarioState` when `missing` intersects `{wheels, wetness_avg_pct, pitstops, fuel_l}`, and `StrategyScenarioState.scenarios` defaults to `()` (`contracts/strategy.py:178-190`). I proved the wholesale discard by handing it a derived object with all 14 scenarios populated:
+
+```
+BEFORE strip: n scenarios = 14 status: RECOMMENDATION
+AFTER strip (iRacing): n scenarios = 0  status: UNAVAILABLE
+AFTER strip (LMU):     n scenarios = 14 status: RECOMMENDATION
+```
+
+Of the 4 gate fields, `fuel_l` is already available; `wheels`, `wetness_avg_pct`, `pitstops` are missing. **All three must be mapped simultaneously** — partial progress buys literally zero scenarios:
+
+```
+wheels+pitstops+wetness_avg_pct -> scenarios=14 status=RECOMMENDATION
+wheels+pitstops                 -> scenarios= 0 status=UNAVAILABLE
+wheels+wetness_avg_pct          -> scenarios= 0 status=UNAVAILABLE
+pitstops+wetness_avg_pct        -> scenarios= 0 status=UNAVAILABLE
+```
+
+**Second finding the task did not anticipate: 7 of the 14 scenarios are hardcoded UNAVAILABLE for *both* sims.** `strategy_evaluation.py:232-258` builds a literal dict and stamps `status="UNAVAILABLE"` on `FUEL_ONLY`, `FUEL_AND_TYRES`, `KEEP_TYRES`, `CHANGE_COMPOUND`, `DRIVER_CHANGE`, `NO_DRIVER_CHANGE`, `PUSH_TO_EXTEND_GAP` — reasons are calibration gaps ("Tyre-change time … unavailable", "Driver allocation … unavailable"), not telemetry gaps. So the real iRacing ceiling is **7 reachable scenarios**: `STAY_OUT`, `PIT_NOW`, `PIT_NEXT_LAP` (all three additionally need `strategy_pit_loss_calibrated`, `strategy_evaluation.py:115,164-170`), `SAVE_FUEL`, `SAVE_VE`, `REACT_TO_RAIN`, `WAIT_FOR_CROSSOVER`. Reaching "parity" with LMU here means reaching the same 7.
+
+##### 2. Voice tools: measured, every tool, iRacing vs LMU
+
+I invoked all 46 `get_*` tools against a real iRacing context and an LMU context. **Eight tools differ (LMU available, iRacing not):**
+
+| Tool | iRacing reason | Gate |
+|---|---|---|
+| `get_tyre_status` | "Live tyre telemetry is unavailable" | 1 (`wheels`) |
+| `get_weather_status` | "Live rain/wetness telemetry is unavailable" | 1 (`rain_pct`/`wetness_avg_pct`) |
+| `get_virtual_energy_status` | "Validated virtual-energy telemetry is unavailable" | 1 (`virtual_energy_pct`) |
+| `get_car_health_status` | "No authoritative car-health signal" | 1 (`wheels`) |
+| `get_strategy_status` | "not yet validated for iRacing" | **2** |
+| `get_race_control_status` | "not yet validated for iRacing" | **2** |
+| `get_track_segment_status` | "not yet validated for iRacing" | **2** |
+| `get_current_stint` | "not yet validated for iRacing" | **2** |
+
+A further 5 denylisted tools (`get_caution_strategy`, `get_pit_execution_status`, `get_service_error_status`, `get_driver_profile`, `get_best_matching_baseline`, `get_recent_stints`) are unavailable on *both* sims in this fixture for unrelated reasons (no SQLite history), but are **independently** blocked for iRacing by Gate 2 and would stay blocked in a real session.
+
+Note `get_race_control_status` is blocked by the **name check** even though `under_yellow` and `primary_flag` *are* populated for iRacing (`iracing_reader.py:297-313`). That is pure gating, not missing data.
+
+Working on iRacing today: `get_current_race_state`, `get_fuel_status`, `get_pace_status`, `get_position_and_gaps` (with `gaps_available=False`), `get_corner_balance`, `get_operating_mode`, `get_recent_engineering_events`.
+
+##### 3. Engineer calls: which can never fire
+
+`source_capabilities.py:123-141` filters every event list through `supported()`. I ran a category census:
+
+```
+CATEGORIES SURVIVING  : BALANCE, EFFECTIVE, FUEL, OPPONENT, PACE, PIT, RACE CONTROL, SESSION, STATIONARY, STINT, TRAFFIC
+CATEGORIES SUPPRESSED : CAR, DAMAGE, PIT SERVICE, STRATEGY, TYRE, VIRTUAL ENERGY, WEATHER
+```
+
+Dead calls include `{POS}_THERMAL` (`decision.py:252-270`), `{POS}_FLAT` / `{POS}_DETACHED` (`decision.py:350,359`), `{POS}_PRESSURE_LOSS` (`decision.py:385`), `{POS}_TYRE_DEGRADED` (`decision.py:426`), `VE_STRATEGY` (`decision.py:515`), all `WEATHER` (`weather.py:356`), all `PIT_SERVICE_*` (`pit_operations.py`), `STRATEGY_PIT_THIS_LAP` / `STRATEGY_STAY_OUT_TO_FINISH` / `STRATEGY_MANDATORY_STOP_THIS_LAP` (`strategy_evaluation.py:336-343`).
+
+**Collateral-damage finding worth acting on immediately:** `POWERTRAIN_OVERHEAT` (`decision.py:305-317`, category `"CAR"`) is driven by `snapshot.overheating`, which the reader **already populates** for iRacing from `EngineWarnings` (`iracing_reader.py:321-323`). I confirmed `snap.overheating` is available. But `source_capabilities.py:68-75` adds `"CAR"` and `"DAMAGE"` to `unsupported_categories` whenever `wheels` is missing, so the event is silently discarded:
+
+```
+POWERTRAIN_OVERHEAT survives iRacing strip? []
+POWERTRAIN_OVERHEAT survives LMU strip?     ['POWERTRAIN_OVERHEAT']
+```
+
+A real, already-mapped iRacing safety-critical warning is being thrown away because an *unrelated* field is unmapped. Splitting the `CAR` category off the `wheels` condition is a ~2-line fix.
+
+##### 4. Leverage ranking — measured, not guessed
+
+I removed each of the 62 fields from `unavailable_fields` one at a time and scored the downstream unlock:
+
+```
++  5  wheels              -> tyres=4, unlocks TYRE + CAR/DAMAGE categories
++  4  pitstops            -> pit_execution, service_error, caution_strategy, PIT SERVICE category
++  2  virtual_energy_pct  -> ve_model, VIRTUAL ENERGY category
++  1  penalties           -> race_control.penalties
++  1  track_limits_steps  -> race_control.track_limits
+---- the remaining 57 fields unlock NOTHING in source_capabilities.py
+```
+
+**57 of the 62 fields are inert at this layer.** `gap_car_ahead_s`, `sector`, `best_lap_s`, `delta_best_s`, `time_of_day_s`, `steering_pct`, `tc`/`abs`, `brake_bias_front_pct`, the whole hybrid/electric block, `track_grip`, `yellow_flag_state`, etc. cost nothing in stripping — they only degrade UI richness and the two gap-dependent tools.
+
+**Single highest-leverage field: `wheels`** (score +5). It alone controls `derived.tyres`, `car_health`, the `TYRE`/`CAR`/`DAMAGE` event categories, `get_tyre_status`, `get_car_health_status`, and `_tyre_risk()` (`strategy_scenario_support.py:52-66`), and it is one of the three scenario gate fields.
+
+**But the highest-leverage *bundle* is the exact triple `wheels + pitstops + wetness_avg_pct`** (+ `rain_pct` for the weather model), because of the all-or-nothing gate — it is the only combination that resurrects all 14 scenarios:
+
+```
+wheels                                          -> +5   scen=0
+wheels+pitstops                                 -> +9   scen=0
+wheels+pitstops+wetness_avg_pct+rain_pct        -> +26  scen=14  cats=5
+ (+virtual_energy_pct+penalties+track_limits…)  -> +33  scen=14  cats=8
+```
+
+##### 5. Field-by-field feasibility against primary sources (fetched, not recalled)
+
+I fetched `kutu/pyirsdk/vars.txt` (326 lines) and `vipoo/irsdk/irsdk_defines.h` (472 lines).
+
+**`wheels` — mappable, with the pit-refresh caveat the task flagged.** `vars.txt` confirms `LFwearL/M/R`, `LRwearL/M/R`, `RFwearL/M/R`, `RRwearL/M/R` = *"LF tire left percent tread remaining, %"*. These are the **pit-refreshed** channels — not live. Live-safe substitutes that *do* update continuously: `LFtempCL/CM/CR` (carcass temps) and `LFshockDefl`/`LFshockVel`. `LFcoldPressure` is explicitly *"as set in the garage"* — static, not a live pressure. So `derived.tyres` thermal state is honestly derivable live; **wear/pressure are not**, and `car_health.pressure_status == "PRESSURE LOSS OBSERVED"` (`decision.py:378-392`) cannot be honestly driven from iRacing.
+
+**`pitstops` — NOT directly published.** I searched every `count` variable in `vars.txt`: only `LapCompleted`, `P2P_Count`, `PlayerCarMyIncidentCount`, `PlayerCarDriverIncidentCount`, `PlayerCarTeamIncidentCount`. **There is no pit-stop-count channel.** It must be *derived* by counting `PlayerCarInPitStall` / `PitstopActive` transitions — which is exactly what `source_capabilities.py:94` means by "validated stop counts". This is the hardest of the three gate fields and the one most likely to be wrong under disconnects/rejoins.
+
+**`wetness_avg_pct` / `rain_pct` — partially mappable.** `vars.txt` has `Precipitation` (*"Precipitation at start/finish line, %"* — single point, not per-sector), `TrackWetness` (*"How wet is the average track surface, irsdk_TrackWetness"*), and `WeatherDeclaredWet`. **Caveat I must state explicitly: the `irsdk_TrackWetness` enum is NOT present in the vipoo `irsdk_defines.h` I fetched** — that header predates the channel (its enum list is `irsdk_StatusField, irsdk_VarType, irsdk_EngineWarnings, irsdk_Flags, irsdk_TrkLoc, irsdk_TrkSurf, irsdk_SessionState, irsdk_CameraState, irsdk_PitSvFlags, irsdk_BroadcastMsg, …`). I cannot confirm its integer values from the sources cited by this repo. `wetness_min/max_pct` per sector look genuinely unavailable — iRacing exposes an average, not a per-sector distribution.
+
+**`penalties` — mappable.** `irsdk_Flags` in the fetched header: `irsdk_black = 0x00010000`, `irsdk_disqualify = 0x00020000`, `irsdk_furled = 0x00080000`, `irsdk_repair = 0x00100000`. The reader already reads `SessionFlags` and uses `0x20000` for DQ (`iracing_reader.py:319-322`), so the plumbing exists.
+
+**`gap_car_ahead_s` / `gap_place_ahead_s` — mappable, currently unread.** `CarIdxF2Time` (*"Race time behind leader or fastest lap time otherwise, s"*) and `CarIdxEstTime` exist. The reader currently reads only `CarIdxPosition/LapCompleted/LapDistPct/TrackSurface/OnPitRoad` (`iracing_reader.py:337-343`). Low strip-leverage but directly fixes `get_position_and_gaps` `gaps_available=False`.
+
+**`virtual_energy_pct` — genuinely unavailable, correctly so.** No VE concept in iRacing; `source_capabilities.py:52-64` already sets `applicable=False` and flips `limiting_resource` to `"FUEL"`. This is right and should stay. It is the clearest "cannot" vs "unmapped" case.
+
+**`track_limits_steps*` — genuinely unavailable.** No incremental track-limits step counter in `vars.txt`; iRacing uses incident points (`PlayerCarMyIncidentCount`), a different model. Mapping it would be a semantic lie.
+
+##### 6. On the read-only question (the user's actual ask)
+
+The relayed user request is about removing the read-only restriction. Confirmed asymmetry and confirmed API:
+
+`irsdk_defines.h` defines `irsdk_BroadcastPitCommand` within `enum irsdk_BroadcastMsg`, dispatched via `void irsdk_broadcastMsg(irsdk_BroadcastMsg msg, int var1, int var2, int var3);`. `enum irsdk_PitCommandMode` (header comment: *"this only works when the driver is in the car"*) provides `irsdk_PitCommand_Clear`, `_WS`, `_Fuel` (*"optionally specify the amount to add in liters"*), `_LF/_RF/_LR/_RR` (*"optionally specifying the pressure in KPa"*), `_ClearTires`, `_FR` (fast repair), `_ClearWS`, `_ClearFR`, `_ClearFuel`.
+
+So iRacing genuinely *can* be commanded, and LMU's shared-memory map genuinely cannot — meaning "the same functionality across both sims" via write access would give iRacing **more** than LMU has, not parity. The current refusal is a deliberate, documented product stance: `iracing_sdk.py:4` (*"No SDK broadcast, pit command, camera control, telemetry toggle, or car-control API is exposed"*) and `docs/user/IRACING_SUPPORT.md:7`. Worth flagging to the user that removing it is a **policy** decision with competition-legality implications, not a technical blocker — and that it is orthogonal to every gap measured above: **none of the 62 fields, 14 scenarios, or 13 denylisted voice tools are blocked by the lack of write access.**
+
+##### 7. Recommended ordering
+
+1. **Delete Gate 2** (`voice/tool_status.py:61-76`) and audit Gate 3's ~10 `!= "lmu"` sites — otherwise field work is invisible to the user.
+2. **Split `CAR` off the `wheels` condition** (`source_capabilities.py:68-75`) — restores an already-working overheat warning for ~2 lines.
+3. **Map the triple `wheels` + `pitstops` + `wetness_avg_pct`/`rain_pct`** together; anything less yields 0 scenarios. Hardest is `pitstops` (must be derived; no SDK channel).
+4. **Map `penalties` from `SessionFlags`** — cheap, plumbing already present.
+5. **Map `CarIdxF2Time`** for gaps — low strip-leverage, high perceived value.
+6. Leave `virtual_energy_pct` and `track_limits_steps*` unavailable; they are honest "cannot"s.
+7. Treat write access as a separate product decision.
+
+**Files:** `/home/user/ssc-race-engineer/src/ssc_engineer/source_capabilities.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/voice/tool_status.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/strategy_evaluation.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/pit_operations.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/decision.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/strategy_scenario_support.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/contracts/strategy.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/strategy_projection_live.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/strategy_gap.py`, `/home/user/ssc-race-engineer/src/ssc_engineer/qualifying.py`.
+
+**Probe scripts** (reproduce any number above): `/tmp/claude-0/-home-user-Test/7eb6641c-6bc8-5bb4-aa53-2e240e7923fb/scratchpad/probe.py` through `probe7.py`. Run with `PYTHONPATH=/home/user/ssc-race-engineer/src:/home/user/ssc-race-engineer:/home/user/ssc-race-engineer/third_party /home/user/ssc-race-engineer/.venv/bin/python <script>`.
+
+
+---
+
+### B.3 The write path
+
+#### The iRacing write path: what the SDK actually offers, and what "same functionality across both sims" would mean
+
+##### 0. Architecture claim: confirmed, with one correction
+
+The read-side claim in the task is correct. `src/ssc_engineer/iracing_reader.py:328` is exactly `result["unavailable_fields"] = tuple(sorted(set(result) - available))`, and `src/ssc_engineer/source_capabilities.py:36` (`apply_source_capabilities`) strips derived advice per missing key. Read-side parity is a fill-the-fields job in one file.
+
+**The write side is not.** There is no write plumbing anywhere in the repo to extend — not for either sim. `RaceSnapshot` (`src/ssc_engineer/contracts/telemetry.py:83`) is a one-way value object; its only pit fields are `pit_state`, `in_pits`, `pitstops` (`:65-68`, `:135-137`). A write path is a *new* subsystem, not a new field.
+
+---
+
+##### 1. The broadcast-message API, verbatim
+
+From `irsdk_defines.h` (vipoo mirror, fetched):
+
+```c
+static const _TCHAR IRSDK_BROADCASTMSGNAME[] = _T("IRSDK_BROADCASTMSG");
+static const _TCHAR IRSDK_MEMMAPFILENAME[]   = _T("Local\\IRSDKMemMapFileName");
+static const _TCHAR IRSDK_DATAVALIDEVENTNAME[] = _T("Local\\IRSDKDataValidEvent");
+```
+
+```c
+enum irsdk_BroadcastMsg {
+    irsdk_BroadcastCamSwitchPos = 0,      // car position, group, camera
+    irsdk_BroadcastCamSwitchNum,          // driver #, group, camera
+    irsdk_BroadcastCamSetState,           // irsdk_CameraState, unused, unused
+    irsdk_BroadcastReplaySetPlaySpeed,    // speed, slowMotion, unused
+    irskd_BroadcastReplaySetPlayPosition, // [sic - typo is in the header]
+    irsdk_BroadcastReplaySearch,
+    irsdk_BroadcastReplaySetState,
+    irsdk_BroadcastReloadTextures,
+    irsdk_BroadcastChatComand,            // [sic] irsdk_ChatCommandMode, subCommand, unused
+    irsdk_BroadcastPitCommand,            // irsdk_PitCommandMode, parameter
+    irsdk_BroadcastTelemCommand,
+    irsdk_BroadcastFFBCommand,            // irsdk_FFBCommandMode, value (float, high, low)
+    irsdk_BroadcastReplaySearchSessionTime,
+    irsdk_BroadcastLast
+};
+```
+
+**The pit-command set — the whole of it:**
+
+```c
+enum irsdk_PitCommandMode {
+    irsdk_PitCommand_Clear = 0,   // Clear all pit checkboxes
+    irsdk_PitCommand_WS,          // Clean the winshield, using one tear off
+    irsdk_PitCommand_Fuel,        // Add fuel, optionally specify the amount to add in liters or pass '0' to use existing amount
+    irsdk_PitCommand_LF,          // Change the left front tire, optionally specifying the pressure in KPa or pass '0' to use existing pressure
+    irsdk_PitCommand_RF,          // right front
+    irsdk_PitCommand_LR,          // left rear
+    irsdk_PitCommand_RR,          // right rear
+    irsdk_PitCommand_ClearTires,  // Clear tire pit checkboxes
+    irsdk_PitCommand_FR,          // Request a fast repair
+    irsdk_PitCommand_ClearWS,     // Uncheck Clean the winshield checkbox
+    irsdk_PitCommand_ClearFR,     // Uncheck request a fast repair
+    irsdk_PitCommand_ClearFuel,   // Uncheck add fuel
+};
+```
+
+**Uncertainty, stated explicitly:** `kutu/pyirsdk/irsdk.py` (fetched) carries `PitCommandMode.tc = 12` (tyre compound) and `BroadcastMsg.video_capture = 13` plus a `VideoCaptureMode` enum. Neither appears in the vipoo mirror of `irsdk_defines.h`. The vipoo mirror is an older SDK snapshot; `vars.txt` does publish `PitSvTireCompound` ("Pit service pending tire compound") and iRacing's own macro list has `#tc`, so `tc = 12` is very likely real — **but I could not confirm it against an iRacing-authored header and you should not ship it unverified.**
+
+**How a message is sent** (`irsdk_utils.cpp`, fetched):
+
+```c
+void irsdk_broadcastMsg(irsdk_BroadcastMsg msg, int var1, int var2, int var3)
+void irsdk_broadcastMsg(irsdk_BroadcastMsg msg, int var1, float var2)
+void irsdk_broadcastMsg(irsdk_BroadcastMsg msg, int var1, int var2)
+```
+- msgId once via `RegisterWindowMessage(IRSDK_BROADCASTMSGNAME)`
+- delivery: `SendNotifyMessage(HWND_BROADCAST, msgId, MAKELONG(msg, var1), var2)`
+- three-int variant packs `MAKELONG(var2, var3)` into lParam
+- float variant: `(int)(var2 * 65536.0f)` then the int path — **used only by FFB**, not by pit commands
+
+pyirsdk's Python equivalent is literally `SendNotifyMessageW(0xFFFF, msgid, broadcast_type | var1 << 16, var2 | var3 << 16)`. `0xFFFF` is `HWND_BROADCAST`.
+
+**Consequences you must design around:**
+- The pit parameter lands in the **low 16 bits of lParam**: an unsigned-ish `0..65535` integer. Fuel is **whole liters only** — you cannot request 34.7 L. Pressures are whole kPa.
+- `SendNotifyMessage` to `HWND_BROADCAST` is **fire-and-forget**. Its BOOL return means "posted", never "applied". There is no ack, no error code, no "iRacing wasn't listening".
+- It is a *broadcast* to every top-level window; any process registering the same message name receives it too.
+- Header comment, verbatim: **"camera and replay commands only work when you are out of your car, pit commands only work when in your car"**.
+
+**Prior art, verified by code search** — `SeriousOldMan/Simulator-Controller`, `Sources/Special/IRC SHM Connector/IRC SHM Connector.cpp`:
+```c
+void setPitstopRefuelAmount(float fuelAmount) {
+    if (fuelAmount == 0) irsdk_broadcastMsg(irsdk_BroadcastPitCommand, irsdk_PitCommand_ClearFuel, 0);
+    else                 irsdk_broadcastMsg(irsdk_BroadcastPitCommand, irsdk_PitCommand_Fuel, (int)fuelAmount);
+}
+void setTyrePressure(int command, float pressure) {
+    irsdk_broadcastMsg(irsdk_BroadcastPitCommand, command, (int)GetKpa(pressure));
+}
+```
+That is a shipping race-engineer app doing exactly what the user is asking for.
+
+---
+
+##### 2. What an app CAN and CANNOT do
+
+**CAN (all via broadcast):**
+- Set the pit-service box: fuel liters, per-corner tyre change + cold pressure kPa, tear-off, fast repair, and the matching uncheck/clear commands. Tyre compound *probably* (`tc=12`, unconfirmed).
+- Camera: `irsdk_BroadcastCamSwitchPos` / `CamSwitchNum` / `CamSetState` (`irsdk_CameraState` bitfield: `irsdk_UIHidden`, `irsdk_UseAutoShotSelection`, …), `irsdk_csMode` (`irsdk_csFocusAtIncident = -3`, `FocusAtLeader = -2`, `FocusAtExiting = -1`, `FocusAtDriver = 0`).
+- Replay: speed, position (`irsdk_RpyPosMode`), search (`irsdk_RpySrchMode`: `PrevIncident`/`NextIncident`/…), `irsdk_RpyState_EraseTape`, search-by-session-time.
+- Chat: `irsdk_ChatCommand_Macro` — **and the header restricts it to "a number from 1-15 representing the chat macro to launch"**, plus `BeginChat`, `Reply`, `Cancel`. You launch *preconfigured* macros; you cannot inject arbitrary chat text. So the extra macro-only pit verbs (`#l`, `#r`, `#t`, `#autofuel` with a lap margin) are reachable only if the driver has bound them to a macro slot.
+- Telemetry disk recording: `irsdk_TelemCommand_Stop/Start/Restart`.
+- FFB: `irsdk_FFBCommand_MaxForce` (float Nm). **This is the one genuine wheel-feel write and it is a trap** — see §4.
+- Textures reload.
+
+**CANNOT — no API exists at all:**
+- Steering, throttle, brake, clutch, gear, ignition, pit limiter. No input injection, nothing.
+- Car setup / garage values (springs, wing, diff, bias). Cold pressures via `irsdk_PitCommand_LF..RR` change the *pit-service request*, not the garage setup.
+- In-car adjustables (brake bias, TC, ABS, engine map, fuel mixture). Note `vars.txt` does **not** contain `dcBrakeBias`, `dcTractionControl`, `dcABS`, `dcThrottleShape` or `dcFuelMixture` — I checked, they are absent from that capture, so I cannot even confirm them as *readable*, let alone writable.
+- Black box / MFD pages, session admin, joining or leaving.
+
+---
+
+##### 3. LMU contrast — and this is the part that changes the answer
+
+**LMU shared memory has no write plane.** `third_party/pyLMUSharedMemory/lmu_data.py:451` maps `SharedMemoryObjectOut` — the name is the contract, it is output-only, four members (`generic`, `paths`, `scoring`, `telemetry`) and no input struct. There is no rF2-style `HWControl`/`PluginControl` region; a grep for control/input/command structures across the library finds only `mControl` ("who's in control: 0=local player, 1=local AI…", `lmu_data.py:223`), a read-only status byte. `src/ssc_engineer/reader.py:109` connects with `create(access_mode=0)` (copy access). The one nuance: `lmu_mmap.py:44-46` does `mmap.mmap(-1, size, name)`, which on Windows yields a *writable* handle by default — but writing there only corrupts your own copy; LMU never reads it back. So: read-only by nature, as the task says.
+
+**However — LMU is not write-incapable.** LMU ships a local HTTP API on `127.0.0.1:6397`, and it has a documented-by-practice **write** endpoint for exactly the thing at issue:
+
+- `GET  http://localhost:6397/rest/garage/PitMenu/receivePitMenu` — read the pit menu
+- `POST http://localhost:6397/rest/garage/PitMenu/loadPitMenu` — **write it back**
+
+Verified in third-party code, not from memory: `SeriousOldMan/Simulator-Controller`, `Sources/Plugins/Libraries/LMURESTProvider.ahk` has both URLs and POSTs fuel level, fuel ratio, tyre compound, tyre pressure, repairs, brake changes and driver assignment by mutating `currentSetting` fields; `tembob64/georace.lmuDataPlugin`, `PluginGetLmuData.cs` does `_httpClient.PostAsync("http://localhost:6397/rest/garage/PitMenu/loadPitMenu", …)`. Counterweight, also verified: `simracecenter/simulator-mcp-servers`, `docs/lmu-mcp-server.md` marks `pit_menu_command` **"Not yet implemented — the spec has a `POST /rest/garage/PitMenu/loadPitMenu` candidate, but its request body shape is undocumented and untested"**, and warns port 6397 is "hardcoded and not confirmed stable/configurable" across LMU versions.
+
+**So the honest answer to "is parity even achievable on the write side": yes, roughly — but the two paths are not comparable in kind.**
+
+| | iRacing | LMU |
+|---|---|---|
+| Transport | registered Windows message, `SendNotifyMessage(HWND_BROADCAST, …)` | localhost HTTP POST |
+| Source of truth | iRacing-authored `irsdk_defines.h` | undocumented; reverse-engineered by the community |
+| Stability | enum values stable for years | port and body shape unversioned, not contracted |
+| Granularity | whole liters, whole kPa, one checkbox per message | full pit-menu JSON, driver swap and brake changes too |
+| Ack | none | HTTP status (weak, but non-zero) |
+| Write beyond the pit box | camera, replay, chat macro, telemetry recording, FFB max force | camera focus, weather (untested), setup screen state |
+
+iRacing would be **ahead on confidence** (official header, fixed enums) and **behind on scope** (no driver swap, no brake-pack change, no fractional fuel). LMU would be ahead on scope and behind on everything else. "Same functionality" is achievable as a *user-facing abstraction* — one `propose_pit_service` capability with per-sim adapters — but the two backends will not have the same failure modes, and pretending they do is the trap.
+
+Also note this repo has never touched 6397: `grep` for `6397|rest/garage|localhost:` across `src/` and `docs/` returns nothing. Adding LMU writes is greenfield too.
+
+---
+
+##### 4. Risk assessment
+
+**Sanctioned:** iRacing publishes the SDK containing `irsdk_BroadcastPitCommand`, and every pit-service command has a first-party in-sim equivalent — the official macro list (`support.iracing.com/.../31000170165-pit-macros-chat-commands`) documents `#clear`, `#cleartires`, `#lf`, `#rf`, `#lr`, `#rr`, `#l`, `#r`, `#t`, `#tc`, `#fuel`, `#autofuel`, `#ws`, `#fr`. The broadcast API is a programmatic door onto a feature the driver already has bound to a keystroke. Multiple shipping commercial/community engineer apps use it. **Setting the pit box is normal, expected, low risk.**
+
+**Not sanctioned, and a bright line:** anything that operates the car. There is no API for it, so the only way to build it is synthetic input (SendInput / vJoy / key injection) into the sim window. That is input automation, it is the thing sporting codes and anti-cheat exist to catch, and it is categorically different from pit service. **The line is not "does the app write?" — it is "does the write go through a documented sim API that a human could have triggered from the sim's own UI, while the car is under human control?"**
+
+Two specific cautions:
+1. **`irsdk_FFBCommand_MaxForce` sits in the same enum family and is not pit service.** It changes the driver's force-feedback scaling mid-session. It is *technically* sanctioned but it is a control-feel change, and an app that speaks with an engineer's voice should not be quietly rescaling the wheel. Exclude it from scope explicitly.
+2. **`irsdk_PitCommand_FR` (fast repair) consumes a limited resource.** `vars.txt`: `FastRepairAvailable` ("How many fast repairs left, 255 is unlimited"), `FastRepairUsed`. A mistaken fast-repair request is not reversible by `ClearFR` once the stop is taken. Treat it as the highest-consequence command in the set.
+3. Any write, correct or not, is invisible: `SendNotifyMessage` can post successfully into a session where the driver is spectating, in another car, or in the wrong session, and nothing will tell you.
+
+---
+
+##### 5. What adding it to *this* codebase looks like
+
+###### 5a. It breaks a stated product contract — deliberately, and that must be explicit
+
+- `SECURITY.md:41` — "no voice or team-sync path can control the simulator, car setup or pit menu", listed under "What the software never does … product contracts, tested in `tests/`, and a report that shows one being violated is a security issue".
+- `src/ssc_engineer/voice/config.py:131-133` — the model's own system prompt: "You cannot control LMU, the car, pit menu, iRacing, or setup."
+- `docs/user/IRACING_SUPPORT.md:7`; `src/ssc_engineer/iracing_sdk.py:1-6` docstring ("No SDK broadcast, pit command, camera control, telemetry toggle, or car-control API is exposed"); `iracing_sdk.py:86,92` open with `0x0004` = `FILE_MAP_READ`.
+- `docs/features/PIT_OPERATIONS.md:36`, `MOBILE_PIT_WALL.md:56`, `TEAMMATE_SETUP.md:44`, `team_operations.py:475`, `control_center.py:1021`.
+
+The existing tests draw the line at the **remote/team** layer, not the local one — `tests/team/test_team_operations_v013.py:81` asserts `remote_pit_menu_control_allowed: False` (served from `runtime/service.py:299,346`), `:124` asserts `client.team_action("operate_pit_menu", {})` raises `TeamGatewayError("Unsupported")`, and `tests/engineering/test_pit_operations_v102.py:185` asserts `execution.automatic_pit_menu_control` is False (`contracts/pit_operations.py:96`). **Those three should stay true and stay tested.** The contract that changes is only the local-driver one, and `SECURITY.md:41` must be rewritten to say so precisely rather than quietly deleted — something like "no *remote* or *team-sync* path can operate the pit menu; local pit-service requests are driver-confirmed and never automatic".
+
+###### 5b. Where the code goes
+
+1. **`src/ssc_engineer/iracing_broadcast.py`** (new, sibling to `iracing_sdk.py`). Pure ctypes: `RegisterWindowMessageW("IRSDK_BROADCASTMSG")` once, `SendNotifyMessageW(0xFFFF, msg_id, msg | var1<<16, var2)`. Enum constants transcribed from the header with the source URL in the docstring, and `tc` omitted or feature-flagged until confirmed. `iracing_sdk.py` stays read-only and untouched — the read map keeps `FILE_MAP_READ`, and its docstring is amended to point at the new module rather than claiming no broadcast exists anywhere.
+2. **A sim-agnostic `PitServiceCommand` contract** + an adapter protocol with two implementations (iRacing broadcast; LMU `POST …/loadPitMenu` behind a default-off flag, given the unstable-shape warning). This is what gives the user "same functionality across both sims" at the UX level.
+3. **Read-back is mandatory and does land back in the 456-line reader.** None of the confirmation channels are mapped today — `iracing_reader.py` reads only `OnPitRoad`, `PitstopActive`, `CarIdxOnPitRoad` (`:286-293`, `:339`). You need `PitSvFlags` (bitfield `irsdk_LFTireChange=0x0001, RFTireChange=0x0002, LRTireChange=0x0004, RRTireChange=0x0008, FuelFill=0x0010, WindshieldTearoff=0x0020, FastRepair=0x0040`), `PitSvFuel` ("Pit service fuel add amount, **l or kWh**" — unit varies by car, do not assume liters), `PitSvLFP/RFP/LRP/RRP` (kPa), `PitSvTireCompound`, `PlayerCarPitSvStatus` (`irsdk_PitSvStatus` — **that enum is ABSENT from the vipoo mirror**; you would be decoding an integer whose meanings you have not sourced), `PitsOpen`, `FastRepairAvailable`/`FastRepairUsed`. `RaceSnapshot` has no home for any of it (`contracts/telemetry.py:65-68`), so this is genuinely new contract surface on both sims.
+4. **Voice**: a tool in `voice/tools.py` (dispatch table at `:295`) + `voice/agent_tools.py`. The precedent is `set_lico_fuel_target` (`voice/tool_lico.py:205-215`, `agent_tools.py:296-308`) — the app's only existing mutating tool — whose docstring already says *"This changes an advisory optimizer target only, never vehicle controls"* and whose success rule is *"Say a change succeeded only when the tool returns available and accepted=true"* (`voice/config.py:123`). Reuse that shape exactly: the tool **proposes**, it does not send.
+
+###### 5c. Authority boundary — where the existing guardrails are not good enough
+
+`voice/guardrails.py` gates imperatives (`_ACTION_PATTERNS` at `:46-63` covers "box", "pit", "change tyres", "change map", "change brake bias") against evidence from tool results. But `_permitted_actions` (`:134-162`) flattens `recommended_action`, `exact_text` and `status` into one casefolded blob and `_action_is_permitted` (`:165`) then does substring tests — `if action in {"box","pit"}: return "box" in evidence or "pit" in evidence`. Any tool result containing the substring "pit" anywhere ("pit road", "pit window", "PIT_LANE") authorises the model to say "box". **That is a saying-it guardrail with a substring hole, and it was never load-bearing because the app could not act.** The moment a tool can move the pit box, that same loose evidence blob is one refactor away from being the thing that authorises an action. Do not route a pit command through the transcript guardrail at all — make it a separate, structured, allow-listed action channel with its own evidence requirements.
+
+###### 5d. Confirmation UX
+
+A pit command needs, at minimum:
+- **Two-phase.** The model/engineer only ever produces a *proposal* object (command, parameter, units, source of the number). Sending is a distinct step the model cannot reach.
+- **Explicit human confirmation per stop, not per session.** Voice "yes" alone is too weak given a live mic and radio traffic — bind it to the existing PTT (`voice/ptt.py`) or a UI button, and show the exact values: "Fuel 34 L (rounded down from 34.7), LF/RF/LR/RR change at 138 kPa, no fast repair."
+- **Surface the truncation.** Whole-liter quantisation means the app must decide and *say* whether it rounds up (safe) or down, every time.
+- **Read-back-or-fail.** After sending, poll `PitSvFlags`/`PitSvFuel`/`PitSv*P` and report "confirmed in the box" or "not confirmed" — never "done" on a `SendNotifyMessage` return value. This is the direct analogue of the LICO `accepted=true` rule already in the prompt.
+- **Preconditions enforced in code**: in the car (header: pit commands only work in-car), `PitsOpen` true, live-not-replay (the reader already rejects replay/spectator as live), session-identity match.
+- **Fast repair behind a second gate**, with `FastRepairAvailable` shown.
+- **Remote stays off.** Mobile pit wall, team gateway and any teammate role must not reach this channel — keep `remote_pit_menu_control_allowed: False` and the `operate_pit_menu` rejection, and add a test that the new local tool is unreachable through `team_action`.
+- **Never automatic.** `automatic_pit_menu_control` stays `False`; a proposal never auto-sends on a strategy trigger.
+
+###### 5e. One-line recommendation
+
+Ship the iRacing write path as **driver-confirmed pit-box requests only** — pit service, nothing else, no FFB, no camera, no chat, no input synthesis — with mandatory telemetry read-back; add the LMU `loadPitMenu` adapter behind a default-off flag and an explicit "undocumented API, may break" warning; rewrite `SECURITY.md:41` to draw the line at *remote* and *automatic* rather than at *write*, and add tests that pin the new line before writing the sender.
+
+
+
+---
+
+### B.4 Effort, model contamination and test infrastructure
+
+#### Scoping iRacing feature parity + removing the read-only restriction (ssc-race-engineer @ e125697)
+
+##### Premise verification
+
+Reproduced the measurement exactly by running the repo's own fixture through the reader (`PYTHONPATH=src:tests:third_party`): `total fields 110 | unavailable 62 | available 48`.
+
+**Correction to the premise: 6 of the 62 are already mapped in `iracing_reader.py` and are "unavailable" only because the test fixture omits the source SDK variable.** `time_of_day_s`←`SessionTimeOfDay` and `best_lap_s`←`LapBestLapTime` (`/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py:221-237`); `delta_best_s`←`LapDeltaToBestLap` gated on `LapDeltaToBestLap_OK` (`:270-271`); `steering_pct`←`SteeringWheelAngle`/`SteeringWheelAngleMax` (`:282-285`); `source_session_id`/`source_track_key` (`:199-263`, tested separately at `/home/user/ssc-race-engineer/tests/engineering/test_iracing_reader.py:146-157`). Real gap ≈56, not 62.
+
+##### Primary sources fetched (not from memory)
+
+`vipoo/irsdk/irsdk_defines.h`, `vipoo/irsdk/irsdk_utils.cpp`, `kutu/pyirsdk/vars.txt` — saved under the scratchpad. **Caveat: the vipoo header mirror is an older SDK revision** — it contains no `irsdk_TrackWetness`, no `irsdk_PitSvStatus`, no `irsdk_PaceFlags`, all three of which `vars.txt` references. The repo cites this header as its ABI reference (`/home/user/ssc-race-engineer/src/ssc_engineer/iracing_sdk.py:3-4`).
+
+Incidental finding: `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py:321` computes `overheating = bool(int(warnings) & 0x41)`, but `irsdk_EngineWarnings` in the fetched header (lines 138-146) defines only `waterTempWarning=0x01` … `revLimiterActive=0x20` — **bit `0x40` is undefined there**. `limiter_active & 0x10` (`pitSpeedLimiter`) is confirmed. Flagged as unverifiable rather than guessed.
+
+##### Q1 — Is parity "fill fields in one 456-line file"?
+
+Directionally true for plumbing (confirmed: `apply_source_capabilities` applied at `/home/user/ssc-race-engineer/src/ssc_engineer/engineering/stint.py:278` and `/home/user/ssc-race-engineer/src/ssc_engineer/runtime/service.py:1321`), but understated: `unavailable_fields` is consulted in **61 places across ~15 modules** outside `source_capabilities.py` (`voice/tool_status.py` ×10, `lico/scope.py:41`, `track_segments.py:438`, five `persistence/*_endpoints.py`, `ui/presentation.py`, `persistence/driver_capabilities.py`).
+
+False in five places:
+- **(a) `pitstops` cannot be filled by a stateless function.** `vars.txt` has `PitstopActive`/`OnPitRoad`/`PlayerCarInPitStall`/`PlayerCarPitSvStatus` but **no completed-stop counter**; LMU reads `scoring.mNumPitstops` directly. Requires edge-counting = state, but `normalize_iracing_snapshot` is pure-per-frame. `pitstops` keys 5 strategy states at `/home/user/ssc-race-engineer/src/ssc_engineer/source_capabilities.py:97-118`.
+- **(b) `wheels` needs a contract change, not a fill.** `WheelState` (`/home/user/ssc-race-engineer/src/ssc_engineer/contracts/telemetry.py:12-42`) has 19 required-no-default fields. iRacing publishes per corner only: `LFtempCL/CM/CR` (**carcass**, C), `LFwearL/M/R` (% tread remaining), `LFcoldPressure` (kPa, garage-set), `LFbrakeLinePress` (bar), `LFodometer` (m). **No live surface-temp channel anywhere in the capture; no optimal-temp channel at all.** Cascade: `engineering/tyres.py:41` gates on `surface_avg_c > 0 and optimal_c > 0` → `thermal_valid` permanently False; `engineering/lap.py:117` records zero temp samples; `calibration.py:616` gates calibrated degradation on `tyre.thermal_data_valid` → permanently `None`. Direction check: LMU `raw_wear` 1.0 = fresh (`calculations.py:57-64`); iRacing `LFwearM` = % tread remaining — same direction, different physical quantity.
+- **(c) Gaps are derivations.** LMU publishes 4 native second-gaps; iRacing has `CarDistAhead`/`CarDistBehind` in **metres** plus `CarIdxEstTime`/`CarIdxF2Time`. `time_behind_leader_s`←`CarIdxF2Time[player]` but only in race sessions per its own description.
+- **(d) `sector`/`current_s1_s`/`current_s2_elapsed_s`** need session-YAML `SplitTimeInfo` (**could not confirm from fetched sources**) + extending the deliberately hard-edged scalar parser at `iracing_reader.py:59-109` which rejects `[`/`{`/`!`/`&`/`*` at `:51-52`.
+- **(e) `lap_invalid` and `penalties` have no honest source.** No validity channel (only `LapDeltaTo*_OK` flags); only `PlayerCarMyIncidentCount`/`DriverIncidentCount`/`TeamIncidentCount`/`WeightPenalty` + `irsdk_Flags` black/furled/repair/disqualify bits (header 170-174). Incident points ≠ LMU penalty counts.
+
+Genuinely impossible list (distinct from merely-unmapped): `virtual_energy_pct`, `lift_and_coast_pct`, `track_limits_steps*`, `sector_yellow`, `track_grip`, `championship`, `headlights`, `dent_severity`, `impact_position_m`, `last_impact_*`, `body_part_detached`, `engine_torque_nm`. `abs_setting`/`tc*`/`motor_map`/`migration`/`*_arb`/`brake_bias_front_pct` are per-car `dc*` vars — **none appear in this `vars.txt` capture** (only `dcPitSpeedLimiterToggle`, `dcStarter`, `dcToggleWindshieldWipers`, `dcTriggerWindshieldWipers`); variable set is car-dependent, discovered at runtime (`iracing_sdk.py` `_metadata`).
+
+Confirmed-cheap mappings: `cloud`←`Skies`, `rain_pct`←`Precipitation`, `abs_active`←`BrakeABSactive`, `local_velocity_mps`←`VelocityX/Y/Z`, `local_acceleration_mps2`←`LatAccel`/`LongAccel`/`VertAccel`, `local_rotation_rad_s`←`YawRate`/`PitchRate`/`RollRate`, `physical_steering_wheel_range_deg`←`SteeringWheelAngleMax`, `start_light`←`SessionFlags` `startHidden/Ready/Set/Go` (header 176-180), `laps_behind_leader` from `CarIdxLapCompleted`.
+
+##### Q2 — Model contamination
+
+**Tyre calibration is properly sim-partitioned (twice).** `TyreCalibrationKey.api_version` (`/home/user/ssc-race-engineer/src/ssc_engineer/calibration.py:27`), built from `snapshot.api_version` (`:600`), SHA-256'd into `model_key` (`:33-36`); samples stored with `api_version` (`/home/user/ssc-race-engineer/src/ssc_engineer/persistence/records.py:293`); training reads `WHERE t.api_version = ?` (`/home/user/ssc-race-engineer/src/ssc_engineer/persistence/calibration.py:479`). Second lock: `communication/context.py:44-45,72-77` forces surface/light/grip to `UNKNOWN` for iRacing → `calibration.py:314-315` refuses `INSUFFICIENT_SCOPE`. Consequence: iRacing tyre models can never train while `track_grip` is unavailable (and it's on the impossible list).
+
+**Driver profiles ARE contaminated and structurally locked.** `/home/user/ssc-race-engineer/src/ssc_engineer/persistence/profiles.py:429-437` hard-allowlists exactly five clauses (`lc.driver`, `lc.vehicle_class`, `lc.vehicle`, `lc.track`, `lc.condition_key`) and raises `ValueError` on anything else — `lc.api_version = ?` is not permitted, even though `lap_conditions` stores the column (`persistence/records.py:216,227`). Same for `driver_baseline` (`profiles.py:235-236,302-303`). Pools `estimated_lap_s` and `estimated_fuel_per_lap_l` across physics engines at `HIGH` confidence.
+
+**Prediction accuracy pools too.** `create_prediction` at `/home/user/ssc-race-engineer/src/ssc_engineer/persistence/live_predictions.py:67-85` records driver/track/vehicle/session_uid but **no simulator/api_version**; `summarize_prediction_accuracy` groups on `(category, model_version, value_kind, unit)` (`/home/user/ssc-race-engineer/src/ssc_engineer/prediction_calibration.py:524-528`).
+
+**Only a path convention saves this today.** `simulator_paths` (`/home/user/ssc-race-engineer/src/ssc_engineer/ui/controller.py:129-155`) redirects to `<root>/iracing/data/ssc_iracing.db`, applied solely by the desktop shell (`ui/application.py:221,236`). **The CLI has no equivalent**: `prepare_debug_runtime_args` rewrites `prepared.database` only for `debug` and returns early at `runtime/service.py:110-111`; `--database` defaults to `Path.cwd()/"data"/"ssc_race_engineer.db"` regardless of `--simulator` (`/home/user/ssc-race-engineer/src/ssc_engineer/cli.py:84-87`). So `ssc-engineer --simulator iracing` writes into the LMU DB unguarded.
+
+**Import path already fabricates conditions.** `_import_condition_key` (`/home/user/ssc-race-engineer/src/ssc_engineer/persistence/calibration.py:27-72`) ignores `unavailable_fields`: absent rain→`DRY`, absent `time_of_day_s`→hour 0→`NIGHT`, absent grip→`MEDIUM`. Live says `UNKNOWN`; import says `DRY_NIGHT_?_MEDIUM`. Today it only poisons `lap_conditions`/profiles; once `wheels` is mapped it writes `tyre_calibration_samples` under a 4-part key that **passes** the `"UNKNOWN"` guard at `calibration.py:314`, converting the working safety valve into a hole.
+
+##### Q3 — Test infrastructure
+
+The fixture is narrower than it looks. `FixtureMapping` infers SDK type from Python type at `/home/user/ssc-race-engineer/tests/engineering/test_iracing_reader.py:100-103`, emitting **kinds 1 (bool), 2 (int), 5 (double) only**. `irsdk_VarType` (header 107-123) is `char=0, bool=1, int=2, bitField=3, float=4, double=5`. So the `float` and `bitField` and string decode paths are **never exercised** — yet real iRacing publishes most channels as `float` and `SessionFlags` as `bitField`. The entire flag block (`iracing_reader.py:295-318`) is tested against a signed int that cannot represent `irsdk_startGo = 0x80000000`. Also `unit` is always packed as `b""` (`:112`).
+
+Four requirements: (1) type-faithful fixture builder covering kinds 0/3/4, units, arrays (~1-2d); (2) **a new raw-frame recorder** — `JSONLRecorder.write` (`/home/user/ssc-race-engineer/src/ssc_engineer/recorder.py:20-40`) serialises `snapshot.to_dict()`/`derived.to_dict()`, i.e. the output of the unit under test, so it cannot serve as a golden corpus; (3) a staleness/cadence test — `vars.txt` documents name/description/unit but **no refresh cadence for any channel**, so the repo's own pit-refresh claim in `docs/user/IRACING_SUPPORT.md` is unprovable from any fetched source and needs `WheelState` provenance fields to even be testable; (4) an iRacing-shaped `sample_snapshot` — `/home/user/ssc-race-engineer/src/ssc_engineer/sample.py:29,43` is LMU-shaped with full `wheels` and is imported by **60 test files**, so all 61 `unavailable_fields` gates are effectively untested for the iRacing shape. `soak.py` has zero `simulator`/`unavailable_fields` handling (LMU-only synthetic).
+
+##### Q4 — Effort (engineer-days)
+
+WP0 fixture builder + raw-frame recorder + iRacing sample/soak generator: **5-7**. WP1 sim-partitioning fixes (extend `profiles.py:429` allowlist, add sim to predictions, force per-sim DB in CLI, fix `_import_condition_key`): **5-8**. WP2 confirmed cheap scalars: **3-5**. WP3 derived gaps + sectors (contingent on `SplitTimeInfo`; +3d if the YAML parser needs nested-array support): **6-10**. WP4 `pitstops` edge-counting + reader-statefulness decision: **5-8**. WP5 `wheels` (optional thermal fields, non-thermal tyre path, staleness provenance, `calibration.py:616` rework): **10-15**. WP6 weather (`TrackWetness` is an **enum**, not a %; needs a new categorical contract field; `wetness_min/max` have no counterpart): **4-6**. WP7 broadcast/write layer: **6-10**. WP8 live validation + doc rewrite: **5-10**. **Total ≈49-79 days (10-16 weeks, one engineer).** WP0+WP1 are prerequisites; WP5 most likely to overrun (frozen contract, 60 dependent test files).
+
+Cannot be validated without live hardware: every refresh-cadence claim; per-car `dc*` availability matrix; `SplitTimeInfo` shape; `irsdk_TrackWetness` values; `EngineWarnings & 0x40`; multi-buffer tear rate under real 60 Hz load (the torn-frame test forces a tear on every read, proving only the refusal path); reconnect across session transition/driver swap/tow; any broadcast command actually taking effect.
+
+##### Q5 — The user's actual question (removing read-only)
+
+**"Same functionality across both sims" is not what this yields — the app is read-only against LMU too.** Verified: `/home/user/ssc-race-engineer/src/ssc_engineer/reader.py:109` opens LMU with `access_mode=0`, and there is no write/pit-command/car-control path to LMU anywhere in the 83,389 src LOC. `pit_operations.py` only compares observed service against a human-approved `PitServiceExpectation` (`contracts/pit_operations.py:11-27`). So broadcast would make iRacing the **only** sim where the app acts on the car — a new product, not gap-closure.
+
+Mechanism (from `irsdk_utils.cpp:323-351`): `RegisterWindowMessage("IRSDK_BROADCASTMSG")` (name at header line 88) then `SendNotifyMessage(HWND_BROADCAST, msgId, MAKELONG(msg, var1), var2)`. `irsdk_BroadcastPitCommand` is enum member 9 (header 369); `irsdk_PitCommandMode` (header 384-398) gives `Clear/WS/Fuel(litres)/LF/RF/LR/RR(kPa)/ClearTires/FR/ClearWS/ClearFR/ClearFuel`. Float overload encodes `(int)(var2 * 65536.0f)` (`irsdk_utils.cpp:335-341`); pit commands use the int overload. ~40 lines of ctypes.
+
+Four properties: (i) **does not compromise the read-only acquisition guarantee** — different subsystem; `OpenFileMappingW(FILE_MAP_READ)` at `iracing_sdk.py:84-91` and the `CreateFileMappingW`-never-called test both survive; only the header comment at `iracing_sdk.py:3-4` needs rewording. (ii) **Fire-and-forget, no addressing, no ack** — `HWND_BROADCAST` hits every top-level window; the only verification is reading back `PitSvFlags` (`irsdk_PitSvFlags`, header 255-265), `PitSvFuel`, `PitSvLFP/LRP/RFP/RRP` (kPa) and `dp*` on the next tick. The write-then-verify loop is the feature; budget for it, not the send. (iii) `irsdk_PitCommandMode` is commented **"this only works when the driver is in the car"** — no remote/teammate stops, a real limit for an endurance app with handover. (iv) `docs/user/IRACING_SUPPORT.md:7` explicitly promises the app "never … broadcasts SDK messages, changes pit settings, or controls the car", echoed at runtime by `runtime/service.py:396` — both need retracting plus a consent gate.
+
+Recommended sequencing: WP0+WP1 first regardless of the write decision (the CLI DB gap and `_import_condition_key` are live correctness bugs today, independent of parity). WP7 is fully decoupled from WP2-6 — needs no new field mapped, cheapest large-visible-value item. Telemetry parity is the expensive half and tops out well short of LMU because ~20 of the 62 fields describe things iRacing does not model.
+
+
+---
+
+### B.5 Adversarial fact-check of every SDK variable claim
+
+
+#### Chunk: tyres-energy-damage
+
+#### Adversarial verification of 7 iRacing SDK mapping claims
+
+##### Sources actually fetched (raw, saved, greppable)
+- `https://raw.githubusercontent.com/kutu/pyirsdk/master/vars.txt` → 326 lines → `/tmp/claude-0/-home-user-Test/7eb6641c-6bc8-5bb4-aa53-2e240e7923fb/scratchpad/vars.txt`
+- `https://raw.githubusercontent.com/vipoo/irsdk/master/irsdk_defines.h` → 472 lines → `/tmp/claude-0/-home-user-Test/7eb6641c-6bc8-5bb4-aa53-2e240e7923fb/scratchpad/irsdk_defines.h`
+- `https://sajax.github.io/irsdkdocs/telemetry/` index (139,021 bytes) → 249 variable doc-page names extracted → `/tmp/claude-0/-home-user-Test/7eb6641c-6bc8-5bb4-aa53-2e240e7923fb/scratchpad/sajax_vars.txt`
+
+##### HEADLINE: 0 fabricated variable names. 1 materially false negative claim. ~6 semantic/unit traps that would produce wrong engineering advice.
+
+Every single one of the 16 concretely-named variables in the seven claims **exists verbatim in a source I fetched**. The other agent did not hallucinate identifiers. The failures are of *reasoning about* the sources, not of inventing names.
+
+##### Structural finding that invalidates two of the claim's evidence arguments
+The two references are **complementary and each incomplete**, not one authoritative and one stale:
+- 97 names appear ONLY in vars.txt — including the entire per-wheel `LF*/RF*/LR*/RR*` family and all `dp*`/`dc*` pit-adjust channels.
+- 19 names appear ONLY in sajax: `energyersbattery`, `energyersbatterypct`, `energybatterytomgu_klap`, `energymgu_klapdeploypct`, `brakeabscutpct`, `handbrake`, `lat`, `lon`, `alt`, `hfshockdefl*`, `hfshockvel*`, `hrshockdefl*`, `hrshockvel*`, `camswitchnum`, `carclassestlaptime`.
+
+Therefore: "absent from vars.txt" is NOT evidence of non-existence, and "404 on sajax" is NOT evidence of non-existence. The claim uses both as if they were.
+
+---
+
+##### Claim-by-claim verdict
+
+###### 1. `wheels` — ALL NAMES CONFIRMED, but THREE SEMANTIC TRAPS the claim glosses over
+All 17 named variables confirmed verbatim in vars.txt: `LFwearL/M/R` (138-140), `LFtempCL/CM/CR` (133-135), `LFcoldPressure` (127), `LFodometer` (128), `RFwearL` (236), `LRwearL` (156), `RRwearL` (257), `PlayerTireCompound` (205), `CarIdxTireCompound` (37), `PitSvLFP` (181), `PitSvLRP` (182), `PitSvRFP` (183), `PitSvRRP` (184).
+
+**Trap (a) — inverted sense.** `LFwearL` is "LF tire left percent tread **remaining**, %". It is remaining tread, not wear. A direct map into a wear field is backwards.
+
+**Trap (b) — carcass, not surface.** `LFtempCL` is "LF tire left **carcass** temperature, C". The complete `^LF` family in vars.txt is exactly 15 variables (lines 126-140) and contains **no tyre surface/tread temperature channel at all**. `grep -i temp` over vars.txt returns only `tempC*` per wheel plus Air/Oil/Track/Water. If the RaceSnapshot tyre field expects surface temp, iRacing does not publish it.
+
+**Trap (c) — the pressure mapping is wrong in kind.** `LFcoldPressure` is "LF tire cold pressure **as set in the garage**, kPa" — a setup value, not a measurement. `PitSvLFP` is "Pit service left front tire pressure" — the *commanded pit-service target*, also a setting. `grep -i ressure` over vars.txt returns 21 hits (air, brake-line, fuel, oil, manifold, cold, dp*ColdPress, PitSv*); **there is no live/hot tyre pressure channel in either source.** Mapping either of these into an observed-pressure field would report a setup number as telemetry.
+
+**The 404 evidence is non-evidence.** `grep -E "^(lf|rf|lr|rr)"` over the 249 sajax page names returns **zero hits** — sajax has no per-wheel pages of *any* kind. The 404 on `lfwearl.html` says nothing about that variable specifically. (Conversely, sajax *does* host `pitsvlfp`/`pitsvlrp`/`pitsvrfp`/`pitsvrrp`, so `PitSv*` is double-confirmed; the claim's own framing missed this.)
+
+**Pit-refresh-only cadence: UNVERIFIED BY PRIMARY SOURCE.** Neither vars.txt nor irsdk_defines.h states anything about update cadence. My own web search did not surface a source confirming it either. It remains a secondary-source assertion — though the repo already holds it as policy at `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py:3-4` ("Pit-only tyre readings are not treated as live tyre evidence"). Treat as the codebase's standing assumption, not as established fact.
+
+**Omissions:** `LFTiresAvailable` (136) / `LFTiresUsed` (137), and sajax's `tiresetsavailable`/`tiresetsused`/`pitsvtirecompound`/`caridxqualtirecompound`/`caridxqualtirecompoundlocked` — all real and useful for a tyre-set model, all unmentioned.
+
+###### 2. `battery_soc_pct` — CONFIRMED, evidence accurate
+`https://sajax.github.io/irsdkdocs/telemetry/energyersbatterypct.html`: **EnergyERSBatteryPct, float**, "The energy storage level as a percentage of it's full capacity", applies to hybrid drivetrains with electric storage. `energyersbattery.html`: **EnergyERSBattery, int, Unit: Joules**, "The energy storage level in Joules."
+
+I independently confirmed the claim's own caveat: **neither name appears anywhere in vars.txt** (`grep -iE "energy|ers|batt"` → zero). The staleness diagnosis is correct.
+
+**One nit that matters for a `_pct` field:** the sajax page specifies no explicit unit; the percentage is implied by the name only. Whether the value is 0–1 or 0–100 is **UNVERIFIED** and must be probed at runtime before scaling.
+
+###### 3. `regen_kw` — **THIS CLAIM'S NEGATIVE EVIDENCE IS FALSE**
+The claim states: *"No variable named regen, recovery or deploy-power exists in **either source** (grepped vars.txt for regen/deploy/charge: zero hits)."* The vars.txt grep is true. The generalisation to "either source" is **wrong**. The sajax index — the very source the same agent trusted for claim 2 — lists two further hybrid channels it missed:
+- **EnergyMGU_KLapDeployPct, float, %** — "The amount of energy deployed via the hybrid drivetrain as a percentage of the limit for a lap of the current track."
+- **EnergyBatteryToMGU_KLap, int** (unit not specified in doc) — "Applies to cars that use hybrid drivetrains and limit the energy they can deploy per lap".
+
+The *conclusion* survives — neither is a power channel in kW, so there is still no direct `regen_kw`. But the stated basis is wrong, and `EnergyMGU_KLapDeployPct` is a materially better deployment signal than the proposed derivative.
+
+**Additional numerical objection:** `EnergyERSBattery` is an **int in Joules**. Differentiating an integer-quantised channel against `SessionTime` at SDK tick rate will be dominated by quantisation noise; `EnergyERSBatteryPct` (float) is the better differentiand, and heavy smoothing is mandatory either way. `SessionTime` confirmed at vars.txt:269 "Seconds since session start, s".
+
+###### 4. `electric_motor_state` — ALL NAMES CONFIRMED, quotes exact, but SEMANTIC STRETCH
+vars.txt:160 `ManualBoost  Hybrid manual boost state,`; :161 `ManualNoBoost  Hybrid manual no boost state,`; :170 `P2P_Status  Push2Pass active or not on your car,` — all three exactly as quoted. sajax `manualboost.html`: **boolean, no description text** (the claim's parenthetical is accurate). sajax `p2p_status.html`: **boolean**, "Shortcut for the player Push to Pass status under CarIdxP2P_Status" — verbatim match.
+
+**Objection:** these are driver-input/request booleans, not a motor state machine. Push-to-Pass (an overtake-boost allowance, e.g. IndyCar) is a *different mechanism* from an ERS/MGU-K hybrid. Collapsing P2P and ManualBoost into one `electric_motor_state` conflates two unrelated systems and will mislabel state on any car that has one but not the other.
+
+**Omissions:** `P2P_Count` (169) and `CarIdxP2P_Count` (26) — "Push2Pass count of usage (or remaining in Race)" — the remaining-uses counters, unmentioned.
+
+###### 5. `motor_map` — UNCONFIRMED verdict is HONEST AND CORRECT
+Independently reproduced: vars.txt `^dc` returns exactly the four named (52 `dcPitSpeedLimiterToggle`, 53 `dcStarter`, 54 `dcToggleWindshieldWipers`, 55 `dcTriggerWindshieldWipers`); `^DC` returns exactly `DCDriversSoFar` (50) and `DCLapStatus` (51); sajax `^dc` returns exactly `dcdriverssofar`, `dclapstatus`. No engine/power-map channel in either source. The runtime-discovery reasoning is sound — irsdk_defines.h exposes a generic variable-header table, not a fixed name list, so car-specific `dc*` channels genuinely are discoverable only at runtime.
+
+**Omission worth surfacing:** `PlayerCarPowerAdjust` (vars.txt:195, "Players power adjust, %", sajax `playercarpoweradjust`) exists. It is the BoP/power adjustment, **not** a driver-selectable engine map — so it does not rescue the claim — but it should have been named and explicitly ruled out rather than left unmentioned.
+
+###### 6. `migration` — UNCONFIRMED verdict is CORRECT, and the negative is stronger than stated
+Reproduced: `grep -iE "migrat"` over vars.txt → 0 hits; over the 249 sajax names → 0 hits. **There is also no brake bias channel anywhere**: sajax `brake*` is exactly `brake`, `brakeabsactive`, `brakeabscutpct`, `brakeraw`; vars.txt `grep -i bias` → 0 hits. So `brake_bias_front_pct` (also on the 62-field unavailable list) fails for the same reason as `migration` — genuinely **not provided by the SDK telemetry stream**, not merely unmapped.
+
+**Open lead neither the claim nor I checked:** brake bias may be present in the **session-info YAML setup blob**, which is a separate data source from the telemetry variable table. That should be checked before declaring it permanently unavailable.
+
+###### 7. `last_impact_age_s` — ALL NAMES CONFIRMED, repo citation verified, but the detector is weak
+vars.txt:269 `SessionTime`; :192 `PlayerCarMyIncidentCount  Players own incident count for this session,`; :142 `LongAccel ... m/s^2`; :122 `LatAccel ... m/s^2`; :314 `VertAccel ... m/s^2` — all confirmed.
+
+The claim's assertion about existing repo usage is **verified true**: `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py:164` gates on `SessionTime` in the required-variable loop (raises `LMUNotPublishing` if missing), and `:222` maps `("session_elapsed_s", "SessionTime", 1.0)`.
+
+**Two objections:**
+- All three accel channels are documented "**including gravity**". `VertAccel` reads ≈9.8 at rest; a naive magnitude-spike detector will need gravity removed or it will misfire on every kerb and crest.
+- `PlayerCarMyIncidentCount` increments for off-tracks and loss-of-control, not only contact. It is not an impact detector. This makes `last_impact_age_s` a *local heuristic*, and it does nothing for the sibling fields `last_impact_magnitude`, `impact_position_m`, `body_part_detached`, `dent_severity`, which remain genuinely unprovidable.
+
+---
+
+##### Cross-cutting confirmations
+
+**All 16 claimed variables are genuinely unmapped today.** I grepped each against `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py`: every one returns **0 occurrences**. The "fill fields in one 456-line file" thesis holds for these specific fields. `iracing_reader.py:328` `result["unavailable_fields"] = tuple(sorted(set(result) - available))` confirmed in place; `wheels` has a dedicated empty-tuple initialiser at `:134`.
+
+**The read-only stance is confirmed as policy, not limitation.** `irsdk_defines.h:358-374` defines `enum irsdk_BroadcastMsg` with 13 entries including `irsdk_BroadcastPitCommand`; `:384-398` defines `enum irsdk_PitCommandMode` with 12 entries (`Clear`, `WS`, `Fuel`, `LF`, `RF`, `LR`, `RR`, `ClearTires`, `FR`, `ClearWS`, `ClearFR`, `ClearFuel`) carrying the comment "this only works when the driver is in the car"; `:462-466` declares three `irsdk_broadcastMsg` overloads. The broadcast API is real and documented. `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_sdk.py:4` ("No SDK broadcast, pit command, camera control, telemetry toggle, or car-control API is exposed") and `/home/user/ssc-race-engineer/docs/user/IRACING_SUPPORT.md:7` are a deliberate choice.
+
+##### What the other agent should be sent back to fix
+1. Retract the "either source" negative in the `regen_kw` claim and incorporate `EnergyMGU_KLapDeployPct` and `EnergyBatteryToMGU_KLap`.
+2. Stop treating a sajax 404 as evidence — sajax has no per-wheel pages at all.
+3. Correct `LFwearL` to remaining-tread (inverted), `LFtempCL` to carcass-only (no surface temp exists), and drop `LFcoldPressure`/`PitSvLFP` as pressure *measurements* — both are settings, and no live pressure channel exists.
+4. Resolve `EnergyERSBatteryPct` scaling (0–1 vs 0–100) at runtime; the doc does not state it.
+5. Split P2P from ERS rather than merging both into `electric_motor_state`.
+6. Check the session-info YAML for brake bias before declaring it unavailable.
+
+Sources: [pyirsdk vars.txt](https://github.com/kutu/pyirsdk/blob/master/vars.txt), [vipoo irsdk_defines.h](https://github.com/vipoo/irsdk/blob/master/irsdk_defines.h), [iRacing SDK Documentation (sajax)](https://sajax.github.io/irsdkdocs/)
+
+
+#### Chunk: weather-track-rules
+
+ADVERSARIAL VERIFICATION VERDICT: **zero fabricated variable names.** All 10 claims name real identifiers that I confirmed in sources I fetched myself. But there are 1 broken citation URL, 2 unit/semantic traps, and 1 falsified premise in the parent task statement.
+
+SOURCES I ACTUALLY FETCHED (saved to /tmp/claude-0/-home-user-Test/7eb6641c-6bc8-5bb4-aa53-2e240e7923fb/scratchpad/irsdk/):
+- `vars.txt` — https://raw.githubusercontent.com/kutu/pyirsdk/master/vars.txt (326 lines)
+- `vipoo_defines.h` — https://raw.githubusercontent.com/vipoo/irsdk/master/irsdk_defines.h (472 lines)
+- `srapps_defines.h` — SIMRacingApps irsdk_defines.h (550 lines)
+- `yaml_structure.go` — quimcalpe/iracing-sdk (297 lines)
+- `pyirsdk.py` — kutu/pyirsdk irsdk.py (855 lines)
+- `sajax_weekend.html`, `sajax_sess.html` — sajax.github.io/irsdkdocs
+
+== PER-CLAIM RESULTS ==
+
+1. **rain_pct ← `Precipitation`** — CONFIRMED VERBATIM. vars.txt:208 `Precipitation   Precipitation at start/finish line, %`. `TrackPrecipitation` confirmed present in sajax_weekend.html and confirmed ABSENT from yaml_structure.go — the claim's "post-dates the rain model" reasoning holds.
+   **UNIT TRAP the claim missed:** iRacing's `%` in vars.txt is a **0.0–1.0 fraction**, not 0–100. Proof from the same file: `Brake  0=brake released to 1=max pedal force, %` (vars.txt:4), `Clutch  0=disengaged to 1=fully engaged, %` (:46). The repo already knows this — `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py:227-230` scales `Throttle`, `Brake`, `FuelLevelPct` by `100.0`. Calling this mapping "DIRECT" is wrong; it needs `("rain_pct", "Precipitation", 100.0)`.
+
+2. **wetness_avg_pct ← `TrackWetness`** — CONFIRMED. vars.txt:307 `TrackWetness   How wet is the average track surface, irsdk_TrackWetness`. Enum confirmed verbatim in srapps_defines.h:233-247 (`irsdk_TrackWetness_UNKNOWN=0, _Dry, _MostlyDry, _VeryLightlyWet, _LightlyWet, _ModeratelyWet, _VeryWet, _ExtremelyWet`) and independently in pyirsdk.py:263-271 `class TrackWetness` with the same 8 members. The claim's caveat is **correct and important**: I grepped vipoo_defines.h — it has 18 enums (lines 102-451) and `irsdk_TrackWetness` is NOT among them. The repo's cited ABI reference cannot document this enum.
+   **SEMANTIC MISMATCH:** this is a single 8-level **ordinal enum**, not a percentage. Any 0-7 → 0-100% conversion is an invented quantisation and must be labelled as such downstream. Related: **`wetness_min_pct` and `wetness_max_pct` (both in the 62-field list) have NO source at all** — I grepped every weather-adjacent channel in vars.txt and iRacing publishes exactly one scalar wetness value (lines 77 `FogLevel`, 208 `Precipitation`, 217 `RelativeHumidity`, 307 `TrackWetness`, 321 `WeatherDeclaredWet`). Min/max are genuinely UNPROVIDABLE, not merely unmapped.
+   **OMISSION:** the claim missed `WeatherDeclaredWet` (vars.txt:321, "The steward says rain tires can be used") — the single most decision-relevant wet channel for a race engineer.
+
+3. **cloud ← `Skies`** — CONFIRMED VERBATIM. vars.txt:278 `Skies   Skies (0=clear/1=p cloudy/2=m cloudy/3=overcast),`. `TrackSkies` confirmed at yaml_structure.go:22 and in sajax_weekend.html. `WeekendOptions:Skies` confirmed at yaml_structure.go:63. All three cites exact.
+
+4. **track_grip ← `SessionTrackRubberState`** — CONFIRMED. yaml_structure.go:95 `SessionTrackRubberState string \`yaml:"SessionTrackRubberState"\``; key also present in sajax_sess.html. `TrackCleanup` at yaml_structure.go:30, `TrackDynamicTrack` at :31 (claim said "30-31", exact). Claim's negative is correct: I grepped `grip|rubber|marbles` in vars.txt → zero hits; no grip channel exists in telemetry.
+   **WEAK EVIDENCE:** the claim's quoted description ("clean, slight usage, ... maximum usage") and the observed value "moderately low usage" rest on a web search / JS-rendered page. The sajax HTML is script-rendered and I could not extract that description text statically. The **key exists**; the **value vocabulary is unverified** — do not hard-code a string→float table off it without a real YAML capture.
+
+5. **time_of_day_s ← `SessionTimeOfDay`** — CONFIRMED, AND ALREADY MAPPED. vars.txt:270 `SessionTimeOfDay   Time of day in seconds, s`. Present at `iracing_reader.py:223` as `("time_of_day_s", "SessionTimeOfDay", 1.0)`. Claim fully accurate. **See the premise falsification below — this claim is the thread that unravels it.**
+
+6. **penalties ← `SessionFlags` black-flag bits** — CONFIRMED VERBATIM. vars.txt:260 `SessionFlags   Session flags, irsdk_Flags`. Every bit matches vipoo_defines.h:170-174 exactly: `irsdk_black=0x00010000`, `irsdk_disqualify=0x00020000`, `irsdk_servicible=0x00040000`, `irsdk_furled=0x00080000`, `irsdk_repair=0x00100000`. Identical in srapps_defines.h:281-285 and pyirsdk.py:65-70. Repo corroboration exact: `iracing_reader.py:213` reads `SessionFlags` into `flags`, and `:317` already tests `flag_bits & 0x20000` for DQ.
+   **OMISSION:** pyirsdk.py:70 carries a bit **neither C header has** — `dq_scoring_invalid = 0x200000`, annotated "Has this car been disqualified and their score card ripped up? ALSO SET .disqualify!". Sources disagree here; the penalties mapping should handle it.
+
+7. **yellow_flag_state ← `SessionFlags` caution bits + `PitsOpen` + `PaceMode`** — CONFIRMED VERBATIM. Bits match vipoo_defines.h:161-167: `irsdk_oneLapToGreen=0x00000200`, `irsdk_greenHeld=0x00000400`, `irsdk_caution=0x00004000`, `irsdk_cautionWaving=0x00008000`. vars.txt:177 `PitsOpen`, :171 `PaceMode   Are we pacing or not, irsdk_PaceMode`. `irsdk_PaceMode` confirmed verbatim at srapps_defines.h:224-231 with exactly the five claimed members. Claim's caveat confirmed by my own grep: `irsdk_PaceMode` is **absent from vipoo_defines.h** — same citation gap as TrackWetness.
+   Note the repo already consumes these bits: `iracing_reader.py:216` (`flags & 0xC000` → FullCourseYellow) and `:297` (`under_yellow` via `0xC108` = yellow|yellowWaving|caution|cautionWaving).
+
+8. **sector_yellow ← `CarIdxSessionFlags` + `CarIdxLapDistPct` + `SplitTimeInfo`** — CONFIRMED VERBATIM. vars.txt:35 `CarIdxSessionFlags   Session flags for each player, irsdk_Flags`; vars.txt:23 `CarIdxLapDistPct   Percentage distance around lap by car index, %`. `SectorNum` at yaml_structure.go:180, `SectorStartPct` (float64) at :181 — claim said "178-183", exact enough. Flag bits confirmed at vipoo_defines.h:155 (`irsdk_yellow=0x8`), :160 (`irsdk_yellowWaving=0x100`), :158 (`irsdk_debris=0x40`).
+   **Caveat the claim understates:** `CarIdxSessionFlags` is documented as "Session flags for each player" — it is a per-car *driver-facing* flag state (what that car is being shown), not a spatial marshalling-sector state. Deriving `sector_yellow` from it means inferring location from `CarIdxLapDistPct` and bucketing by `SectorStartPct`. That is a **heuristic reconstruction**, not a published channel. `CarIdxLapDistPct` is already consumed in `iracing_reader.py::_opponents`.
+
+9. **start_light ← `SessionFlags` start bits** — CONFIRMED VERBATIM. vipoo_defines.h:177-180: `irsdk_startHidden=0x10000000`, `irsdk_startReady=0x20000000`, `irsdk_startSet=0x40000000`, `irsdk_startGo=0x80000000`. Identical in srapps_defines.h:288-291 and pyirsdk.py:73-75.
+   **IMPLEMENTATION TRAP:** `irsdk_startGo = 0x80000000` sets bit 31. `SessionFlags` is an `irsdk_bitField` (32-bit). If the SDK layer hands Python a **signed** int32, that value arrives as `-2147483648` and `int(flags) & 0x80000000` behaves unexpectedly / the value fails a naive range check. The repo's `_number()` at `iracing_reader.py:112-116` coerces to `float` — a float64 holds it fine, but only if the underlying read is unsigned. Every existing bit test in the file (`0x10`, `0x20`, `0xC108`, `0x20000`) is below bit 28, so this path has never been exercised. Must be verified against the live SDK, not assumed.
+
+10. **championship ← WeekendInfo IDs** — CONFIRMED VERBATIM, all five, exact lines: `SeriesID` yaml_structure.go:33, `SeasonID`:34, `LeagueID`:37, `EventType`:40, `Category`:41 (claim said "33-41", exact). All five also present in sajax_weekend.html. Claim's negative confirmed by my grep: `series|champ|league|season` in vars.txt → **zero hits**. Reachability claim correct — `iracing_reader.py:87` handles `section == "WeekendInfo" and depth == 1`, and `:199`/`:256` already read sibling keys `SessionID`, `SubSessionID`, `TrackID`.
+
+== CITATION DEFECT (affects claims 6, 7, 9) ==
+Three claims cite `https://raw.githubusercontent.com/vipoo/irsdk/blob/master/irsdk_defines.h` and say "fetched to disk". **That URL returns HTTP 404** — I tested it. `raw.githubusercontent.com` takes no `/blob/` segment; the working URL is `https://raw.githubusercontent.com/vipoo/irsdk/master/irsdk_defines.h`. The *content* is nonetheless correct (I verified against the real file), so this is citation hygiene, not fabrication — but in an exercise built on "fetch, don't recall", a cited URL that 404s is exactly the signature of a value reproduced from memory and back-filled with a plausible link. Treat the claimed line numbers as approximate: the `irsdk_Flags` enum body actually spans vipoo_defines.h:149-181, not "149-183".
+
+== PREMISE FALSIFICATION (more consequential than any single claim) ==
+The task statement asserts 62 fields are UNAVAILABLE for iRacing. **At least 6 of those 62 are already mapped in `iracing_reader.py` today**; they appear "unavailable" only because the fixture used for the measurement omits the source channels. I grepped tests/ for `SessionTimeOfDay`, `LapBestLapTime`, `Precipitation`, `TrackWetness` — **zero hits anywhere**. The mechanism is `iracing_reader.py:177-180`: `numeric()` calls `put()` (which does `available.add(name)`, :173-175) **only when the telemetry key is present**, so a thin fixture inflates the unavailable set at `:328`.
+Already mapped but listed as unavailable:
+- `best_lap_s` ← `LapBestLapTime` — `iracing_reader.py:225`; vars.txt:97 `Players best lap time, s`
+- `delta_best_s` ← `LapDeltaToBestLap` — `:271`; vars.txt:102 `Delta time for best lap, s`
+- `time_of_day_s` ← `SessionTimeOfDay` — `:223`; vars.txt:270
+- `steering_pct` ← `SteeringWheelAngle`/`SteeringWheelAngleMax` — `:282-285`; vars.txt:283-284 (both rad)
+- `source_session_id` — `:203`
+- `source_track_key` — `:258`
+Bonus: `physical_steering_wheel_range_deg` (also in the 62) is trivially derivable — `SteeringWheelAngleMax` (vars.txt:284, rad) is **already read** at `iracing_reader.py:283`. Caution on semantics: the repo divides by 2 at `:285`, implying it reads `AngleMax` as lock-to-lock range rather than one-sided max; vars.txt says only "Steering wheel max angle, rad" and does not disambiguate. Confirm before converting.
+**Re-run the measurement against a full-channel capture before costing the work.** The real gap is smaller than 62.
+
+== BOTTOM LINE ==
+No hallucinated identifiers. Every variable, enum member, bit value and YAML key in all 10 claims exists in a source I fetched, at or within one or two lines of the cited position. Act on the claims, but: (a) scale `Precipitation` by 100, (b) treat `TrackWetness` as an ordinal and drop `wetness_min_pct`/`wetness_max_pct` as unprovidable, (c) verify signedness before testing `irsdk_startGo`, (d) fix the vipoo raw URL wherever it is recorded, (e) re-measure the baseline.
+
+
+#### Chunk: timing-gaps-setup-pit
+
+ADVERSARIAL FACT-CHECK RESULT: **zero fabricated variable names found.** Every iRacing SDK identifier in the 26 claims appears verbatim in a source I actually fetched. The one name that was at risk (`dcTractionControlCut`) the claiming agent had already self-flagged as unconfirmed, and I independently confirmed it is absent. However I found **5 false premises** (fields claimed as work-to-do that are already implemented in the repo), **1 unflagged semantic mismatch** (`CarIdxF2Time`), **1 unit mismatch class** (all `dc*` channels), and **1 likely pre-existing bug in the repo** (`steering_pct`).
+
+== SOURCES I ACTUALLY FETCHED (saved under /tmp/claude-0/-home-user-Test/7eb6641c-6bc8-5bb4-aa53-2e240e7923fb/scratchpad/src/) ==
+- `vars.txt` — raw.githubusercontent.com/kutu/pyirsdk/master/vars.txt, 326 lines / 327 var entries.
+- `irsdk_defines.h` — raw.githubusercontent.com/vipoo/irsdk/master/irsdk_defines.h, 472 lines.
+- `irsdk_utils.cpp` — vipoo/irsdk, 368 lines.
+- `sess.yaml` — mherbold/iRacing-TV-Controller Notes/irsdk-data-session.yaml, 2675 lines (real session YAML).
+- `tv.cs` — SVappsLAB/iRacingTelemetrySDK `Sdk/SVappsLAB.iRacingTelemetrySDK.EnumsAndFlags/TelemetryVar.cs` (branch `main`), 461 enum entries. NOTE: the claiming agent cited a path (`Models/iRacingData.cs`) that 404s; the real generated table lives at `Sdk/SVappsLAB.iRacingTelemetrySDK.CodeGen/iRacingData.cs` — I retrieved its content via GitHub code search and it matches the quoted `VarItem(...)` text verbatim. Wrong path, right content.
+- `sajax/irsdkdocs` `docs/telemetry/steeringwheelanglemax.md` (branch `master`), fetched HTTP 200.
+- GitHub code search across SIMRacingApps, bengsfort/irsdk-node, emilioSp/node-iracing-sdk, VylsainLab/Augusta, SVappsLAB (42–161 hits per identifier).
+
+== FINDING 1 (most important): FIVE CLAIMS ARE ALREADY IMPLEMENTED — the "62 unavailable" premise is wrong for them ==
+The `unavailable_fields` set at `/home/user/ssc-race-engineer/src/ssc_engineer/iracing_reader.py:328` is computed *per snapshot* (`tuple(sorted(set(result) - available))`), so it reflects **what the fixture happened to contain**, not what the reader can map. Every `put()` is conditional. These five are already coded:
+- **best_lap_s** — `iracing_reader.py:225`: `("best_lap_s", "LapBestLapTime", 1.0)`. Already mapped.
+- **delta_best_s** — `iracing_reader.py:270-271`: `if telemetry.get("LapDeltaToBestLap_OK") is True: numeric("delta_best_s", "LapDeltaToBestLap")`. Already mapped, **already gated exactly as the claim proposes**.
+- **source_session_id** — `iracing_reader.py:199-207`: composes `f"iracing:{SessionID}:{SubSessionID}:{session_num}"`. Already mapped, identical composition to the claim.
+- **source_track_key** — `iracing_reader.py:252-263`: composes `f"iracing:{TrackID}:{TrackConfigName}:{length*1000:.1f}"`, gated on `TrackLength` ending in `" km"`. Already mapped, identical composition to the claim.
+- **steering_pct** — `iracing_reader.py:283-285`. Already mapped. (See Finding 4.)
+Bonus: **time_of_day_s** is also in the 62-field "unavailable" list yet is already mapped at `iracing_reader.py:223` via `SessionTimeOfDay`. The fixture at `tests/engineering/test_iracing_reader.py:152-153` supplies `SessionID/SubSessionID/TrackID/TrackConfigName` but no `LapBestLapTime`, `SessionTimeOfDay` or `LapDeltaToBestLap` — which is why those showed as unavailable. **Anyone acting on this list must re-derive it from the code, not the fixture, or they will write duplicate mappings.**
+
+== FINDING 2 (unflagged semantic mismatch): time_behind_leader_s / CarIdxF2Time ==
+Name CONFIRMED verbatim, `vars.txt`: `CarIdxF2Time    Race time behind leader or fastest lap time otherwise, s`. But the claim labels this **DIRECT** with no caveat, and the SDK's own description says the channel is **mode-dependent**: it is time-behind-leader *only in a race session*; in practice/qualifying it carries a **fastest lap time** instead. Mapping it straight into `time_behind_leader_s` would feed a lap time into a gap field outside races. Must be gated on session type (`session_row["SessionType"]`, read at `iracing_reader.py:210-211`). This is the one real error the claiming agent missed.
+
+== FINDING 3 (unit mismatch, affects 5 claims): every `dc*` channel is UNITLESS ==
+All `dc*` names CONFIRMED real, but the authoritative generated table gives them an **empty unit string**:
+`VarItem("dcABS", 4, 1, false, "In car abs adjustment", "")`, `VarItem("dcAntiRollFront", 4, 1, false, "In car front anti roll bar adjustment", "")`, `VarItem("dcAntiRollRear", 4, 1, false, "In car rear anti roll bar adjustment", "")`, `VarItem("dcBrakeBias", 4, 1, false, "In car brake bias adjustment", "")`, `VarItem("dcTractionControl", 4, 1, false, "In car traction control adjustment", "")`.
+- **brake_bias_front_pct ← dcBrakeBias**: the target field is a **percentage**; the SDK provides an unitless "in car adjustment". For some cars this reads as a front-bias percent, for others it is a click/index. The claim asserts a `_pct` mapping the SDK does not warrant. Needs per-car validation, not a straight assignment. (`dcBrakeBiasFine` also exists in the enum — the claim did not mention it.)
+- **front_arb / rear_arb ← dcAntiRollFront/Rear**: unitless click index, not a physical roll rate.
+- **tc ← dcTractionControl**, **abs_setting ← dcABS**: unitless setting index. Fine as an opaque level, wrong if any consumer assumes units.
+
+== FINDING 4 (pre-existing repo bug, surfaced by claim 21): steering_pct is off by 2x ==
+`iracing_reader.py:285`: `put("steering_pct", max(-100.0, min(100.0, angle / (angle_max / 2.0) * 100.0)))` — the repo divides by **half** of `SteeringWheelAngleMax`. The fetched sajax doc states verbatim: *"SteeringWheelAngleMax is the steering wheel angle in radians at which the car reaches full lock."* So `angle / angle_max` already spans -1..1 and the claim's formula is the correct one. As written the repo saturates its clamp at **half lock**. The claiming agent's formula is right and the shipped code is wrong — worth a separate fix.
+
+== FINDING 5: negative claims are CORRECT (I tried to break them and could not) ==
+- **No sector-time variable exists.** Exhaustive grep over `vars.txt` (327 entries) and the SVappsLAB enum (461 entries) for `sector|split|s1|s2` returns **zero** hits. So `current_s1_s` / `current_s2_elapsed_s` / `sector` are genuinely derive-only. CONFIRMED.
+- **`SplitTimeInfo` exists** at `sess.yaml:2667-2672`, exactly as quoted: `Sectors: - SectorNum: 0 / SectorStartPct: 0.000000 - SectorNum: 1 / SectorStartPct: 0.500000`. **NEW CAVEAT the claim missed:** this sample is an **oval with only TWO sectors**. Sector count is track-dependent, so a hardcoded LMU-shaped s1/s2/s3 derivation will break. (Minor: `split_sectors` is at `src/ssc_engineer/lico/adapters.py:125`, not 127; it does take `(lap, s1, s2)` as inputs as claimed.)
+- **No pit-stop count variable exists.** Confirmed: `vars.txt` and the 461-name enum contain only `PitstopActive`, `PlayerCarPitSvStatus`, `CarIdxFastRepairsUsed`, `FastRepairAvailable/Used`, `PlayerFastRepairsUsed`, `dpFastRepair` and the `dp*` service-request channels — **no counter**. Edge-counting `OnPitRoad`/`PlayerCarInPitStall`/`PitstopActive` is the only route. CONFIRMED.
+- **`dcTractionControlCut` does NOT exist.** Zero hits in the 461-name enum and zero in `vars.txt`. The enum does contain `dcTractionControl`, `dcTractionControl2`, `dcTractionControl3`, `dcTractionControl4`, `dcTractionControlToggle` — all described only as generic "In car traction control N adjustment" with no unit. The agent's refusal to treat `tc_cut`/`tc_slip` as confirmed was **correct and should be upheld**.
+
+== FINDING 6: why `dc*` are absent from vars.txt (agent's reasoning was right, its evidence was weak) ==
+`vars.txt` contains **only four** `dc*` entries (`dcPitSpeedLimiterToggle`, `dcStarter`, `dcToggleWindshieldWipers`, `dcTriggerWindshieldWipers`). That proves `vars.txt` is a **single-car dump**, so absence there is not evidence of non-existence. This is much stronger proof of per-car availability than the agent's cited "absent from an F1-car dump". Practical consequence: every `dc*` read must be treated as optional/missing-at-runtime, which the reader's `numeric()`/`put()` pattern (`iracing_reader.py:175-181`) already handles correctly.
+
+== PER-CLAIM VERDICT TABLE ==
+CONFIRMED VERBATIM IN vars.txt (exact description + unit match): `LapBestLapTime` (s), `LapDeltaToBestLap` (s), `LapDeltaToBestLap_OK` (bool), `SessionTime` (s), `LapDistPct` (%), `CarIdxEstTime` (s), `CarDistAhead` (m), `CarDistBehind` (m), `Speed` (m/s), `CarIdxPosition`, `CarIdxLapCompleted`, `CarIdxF2Time` (s), `OnPitRoad`, `PlayerCarInPitStall`, `PitstopActive`, `PlayerCarPitSvStatus`, `BrakeABSactive`, `SteeringWheelAngle` (rad), `SteeringWheelAngleMax` (rad), `VelocityX/Y/Z` (m/s), `LongAccel/LatAccel/VertAccel` (m/s^2), `YawRate/PitchRate/RollRate` (rad/s), `SessionNum`, `PlayerCarIdx`. — 26 names, all real.
+CONFIRMED VIA SVappsLAB + 4 INDEPENDENT REPOS (car-dependent, not in vars.txt): `dcBrakeBias`, `dcAntiRollFront`, `dcAntiRollRear`, `dcTractionControl`, `dcABS`. — 5 names, all real, all unitless.
+CONFIRMED IN REAL SESSION YAML: `WeekendInfo:SessionID` (207172967, `sess.yaml:34`), `SubSessionID` (61773832, `:35`), `TrackID` (339, `:4`), `TrackConfigName` (Oval, `:9`), `TrackLength` (2.34 km, `:5`), `TrackLengthOfficial` (2.41 km, `:6`), `SplitTimeInfo:Sectors[]:SectorStartPct` (`:2667`). — all real.
+CORRECTLY REJECTED: `dcTractionControlCut` — does not exist.
+Repo cross-refs all check out: `iracing_reader.py:336-337` reads `CarIdxPosition`/`CarIdxLapCompleted` in `_opponents()`; `iracing_reader.py:328` is the `unavailable_fields` line; `iracing_sdk.py:3-5` says "No SDK broadcast, pit command, camera control, telemetry toggle, or car-control API is exposed."
+
+== ADDITIONAL CAVEATS ON THE "DERIVABLE" GAP CLAIMS (not errors, but the claims understate the work) ==
+- `CarIdxEstTime` is *"Estimated time to reach current location on track"* — a per-car **lap-elapsed estimate**, not a gap. Differencing it yields a gap only after same-lap normalisation using `CarIdxLapCompleted`/`CarIdxLapDistPct`; raw subtraction across a start/finish wrap gives a full-lap error.
+- `CarDistAhead`/`CarDistBehind` are **metres**. Converting to seconds by dividing by `Speed` is a crude approximation and divides by zero at a standing start or under a stopped safety car — needs a guard.
+- `LongAccel`/`LatAccel`/`VertAccel` are documented *"(including gravity)"*, i.e. proper acceleration, not pure kinematic acceleration. On banking or kerbs this differs materially from what LMU's `local_acceleration_mps2` likely means.
+
+== BEARING ON THE USER'S ACTUAL QUESTION (removing read-only on iRacing) ==
+The fetched `irsdk_defines.h` confirms the write path the repo deliberately declines: `enum irsdk_BroadcastMsg` at `irsdk_defines.h:358-374` includes `irsdk_BroadcastPitCommand` (`:369`), `irsdk_BroadcastChatComand` (`:368`), `irsdk_BroadcastTelemCommand` (`:370`), `irsdk_BroadcastFFBCommand` (`:371`) and the camera/replay commands; `enum irsdk_PitCommandMode` at `:384` is annotated *"this only works when the driver is in the car"*; the helper overloads are declared at `irsdk_defines.h:462-466` (`void irsdk_broadcastMsg(irsdk_BroadcastMsg msg, int var1, int var2, int var3)` and variants). So the asymmetry stated in the task is real and verified: iRacing genuinely offers a documented write/broadcast API, and `src/ssc_engineer/iracing_sdk.py:3-5` excludes it by choice, not by limitation.
+
+BOTTOM LINE: the claiming agent did not hallucinate a single SDK identifier and its self-flagged uncertainties were well-judged. Reject/repair these four items before acting: (1) drop `best_lap_s`, `delta_best_s`, `steering_pct`, `source_session_id`, `source_track_key` (and `time_of_day_s`) from the work list — already implemented; (2) gate `CarIdxF2Time` on race sessions; (3) do not treat `dcBrakeBias` as a percentage without per-car validation; (4) do not assume three sectors from `SplitTimeInfo`.
